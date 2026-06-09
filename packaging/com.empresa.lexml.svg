@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <rect x="16" y="16" width="224" height="224" rx="28" fill="#1d6fb8"/>
+  <rect x="48" y="56" width="160" height="144" rx="10" fill="#f5f5f5"/>
+  <rect x="48" y="56" width="160" height="30" rx="10" fill="#0f4c81"/>
+  <g stroke="#c8d2dc" stroke-width="3">
+    <line x1="48" y1="116" x2="208" y2="116"/>
+    <line x1="48" y1="144" x2="208" y2="144"/>
+    <line x1="48" y1="172" x2="208" y2="172"/>
+    <line x1="101" y1="86" x2="101" y2="200"/>
+    <line x1="155" y1="86" x2="155" y2="200"/>
+  </g>
+  <text x="128" y="232" font-family="serif" font-size="34" font-weight="bold"
+        fill="#f5f5f5" text-anchor="middle">XML</text>
+</svg>

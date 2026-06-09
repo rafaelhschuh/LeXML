@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lê-XML
+Comment=Leitor e editor de arquivos XML em tabela
+Exec=lexml-gtk %f
+Icon=com.empresa.lexml
+Terminal=false
+Categories=Office;Utility;
+MimeType=application/xml;

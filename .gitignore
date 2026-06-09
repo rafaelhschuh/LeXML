@@ -1,0 +1,14 @@
+# Artefatos de build do Rust/Cargo
+/target/
+
+# Empacotamento AppImage
+/AppDir/
+/squashfs-root/
+/.appimage-tools/
+*.AppImage
+*.AppImage.zsync
+
+# Arquivos temporários e de sistema
+*.swp
+*~
+.DS_Store
