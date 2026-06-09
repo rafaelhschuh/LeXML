@@ -184,6 +184,7 @@ fn open_into(
 pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder()
         .application_id("com.empresa.lexml")
+        .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
     app.connect_startup(|_| {
         // Por padrão segue o sistema (claro/escuro). Override opcional:
@@ -197,10 +198,20 @@ pub fn run() -> glib::ExitCode {
         adw::StyleManager::default().set_color_scheme(scheme);
     });
     app.connect_activate(|app| {
-        let initial = std::env::args().nth(1).map(std::path::PathBuf::from);
-        let window = build_window(app, initial);
+        let window = build_window(app, None);
         window.present();
     });
-    // evita que o GApplication tente tratar o argumento como opção
-    app.run_with_args::<String>(&[])
+    app.connect_open(|app, files, _hint| {
+        for file in files {
+            if let Some(path) = file.path() {
+                let window = build_window(app, Some(path));
+                window.present();
+            }
+        }
+        if files.is_empty() {
+            let window = build_window(app, None);
+            window.present();
+        }
+    });
+    app.run()
 }
