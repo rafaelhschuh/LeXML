@@ -22,7 +22,6 @@ pub struct DocumentView {
     store: gio::ListStore,
     selection: gtk::SingleSelection,
     colview: gtk::ColumnView,
-    col_dropdown: gtk::DropDown,
     status: gtk::Label,
     find_entry: gtk::SearchEntry,
 }
@@ -69,12 +68,8 @@ impl DocumentView {
         sql_btn.set_tooltip_text(Some("Consulta SQL completa (somente leitura)"));
         bar.append(&sql_btn);
 
-        let col_dropdown = gtk::DropDown::from_strings(&[]);
-        col_dropdown.set_tooltip_text(Some("Coluna para somar"));
-        bar.append(&col_dropdown);
-
         let sum_btn = gtk::Button::with_label("Σ Somar");
-        sum_btn.set_tooltip_text(Some("Somar a coluna selecionada"));
+        sum_btn.set_tooltip_text(Some("Somar uma coluna"));
         bar.append(&sum_btn);
 
         let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
@@ -118,7 +113,6 @@ impl DocumentView {
             store,
             selection,
             colview,
-            col_dropdown,
             status,
             find_entry: find_entry.clone(),
         });
@@ -206,11 +200,6 @@ impl DocumentView {
             .collect();
         // Uma única operação em lote em vez de 50k append (evita custo quadrático).
         self.store.splice(0, self.store.n_items(), &objs);
-
-        // dropdown de soma
-        let strs: Vec<&str> = vis_names.iter().map(|s| s.as_str()).collect();
-        self.col_dropdown
-            .set_model(Some(&gtk::StringList::new(&strs)));
     }
 
     fn rebuild_columns(self: &Rc<Self>, names: &[String]) {
@@ -307,27 +296,41 @@ impl DocumentView {
         }
     }
 
-    fn do_sum(&self) {
-        let model = match self.col_dropdown.model() {
-            Some(m) => m,
-            None => return,
-        };
-        let sel = self.col_dropdown.selected();
-        if sel == gtk::INVALID_LIST_POSITION {
+    fn do_sum(self: &Rc<Self>) {
+        let names = self.state.columns.borrow().clone();
+        if names.is_empty() {
             return;
         }
-        let col = model
-            .item(sel)
-            .and_then(|o| o.downcast::<gtk::StringObject>().ok())
-            .map(|s| s.string().to_string());
-        let Some(col) = col else { return };
-        match self.state.dp.sum_column(&col) {
-            Ok((total, count)) => {
-                let body = format!("Total: {}\n({} valor(es) numérico(s))", fmt_br(total), count);
-                self.info(&format!("Soma de {col}"), &body);
+        let strs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let dropdown = gtk::DropDown::from_strings(&strs);
+
+        let win = self.window();
+        let dialog = adw::MessageDialog::new(
+            win.as_ref(),
+            Some("Somar coluna"),
+            Some("Escolha a coluna a somar:"),
+        );
+        dialog.set_extra_child(Some(&dropdown));
+        dialog.add_responses(&[("cancel", "Cancelar"), ("sum", "Somar")]);
+        dialog.set_default_response(Some("sum"));
+        dialog.set_response_appearance("sum", adw::ResponseAppearance::Suggested);
+        let me = self.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp != "sum" {
+                return;
             }
-            Err(e) => self.error(&format!("Não foi possível somar:\n{e}")),
-        }
+            let sel = dropdown.selected();
+            let Some(col) = names.get(sel as usize).cloned() else { return };
+            match me.state.dp.sum_column(&col) {
+                Ok((total, count)) => {
+                    let body =
+                        format!("Total: {}\n({} valor(es) numérico(s))", fmt_br(total), count);
+                    me.info(&format!("Soma de {col}"), &body);
+                }
+                Err(e) => me.error(&format!("Não foi possível somar:\n{e}")),
+            }
+        });
+        dialog.present();
     }
 
     fn open_sql_dialog(self: &Rc<Self>) {
