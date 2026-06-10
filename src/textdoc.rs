@@ -1,5 +1,6 @@
+use crate::dialog;
 use crate::i18n::tr;
-use adw::prelude::*;
+use gtk::prelude::*;
 use gtk::glib::clone;
 use gtk::gio;
 use std::cell::RefCell;
@@ -126,8 +127,6 @@ impl TextDocView {
     }
 
     fn error(&self, body: &str) {
-        let d = adw::MessageDialog::new(self.window().as_ref(), Some(tr("error")), Some(body));
-        d.add_response("ok", tr("ok"));
-        d.present();
+        dialog::error(self.window().as_ref(), body);
     }
 }

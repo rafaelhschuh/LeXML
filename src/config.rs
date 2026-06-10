@@ -4,9 +4,8 @@ use std::path::PathBuf;
 /// Preferências persistidas do app (tema e idioma).
 #[derive(Clone)]
 pub struct Config {
-    pub theme: String,    // "system" | "light" | "dark"
-    pub lang: String,     // "pt" | "en"
-    pub platform: String, // "auto" | "gnome" | "kde"
+    pub theme: String, // "system" | "light" | "dark"
+    pub lang: String,  // "pt" | "en"
 }
 
 impl Default for Config {
@@ -14,7 +13,6 @@ impl Default for Config {
         Config {
             theme: "system".into(),
             lang: "pt".into(),
-            platform: "auto".into(),
         }
     }
 }
@@ -41,7 +39,6 @@ pub fn load() -> Config {
             match k.trim() {
                 "theme" => cfg.theme = v,
                 "lang" => cfg.lang = v,
-                "platform" => cfg.platform = v,
                 _ => {}
             }
         }
@@ -54,9 +51,6 @@ pub fn save(cfg: &Config) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let body = format!(
-        "theme={}\nlang={}\nplatform={}\n",
-        cfg.theme, cfg.lang, cfg.platform
-    );
+    let body = format!("theme={}\nlang={}\n", cfg.theme, cfg.lang);
     let _ = fs::write(path, body);
 }

@@ -1,7 +1,8 @@
 use crate::xmldoc::{XmlDoc, QueryResult};
 use crate::row_object::RowObject;
+use crate::dialog;
 use crate::i18n::tr;
-use adw::prelude::*;
+use gtk::prelude::*;
 use gtk::glib::{self, clone};
 use gtk::{gdk, gio};
 use std::cell::{Cell, RefCell};
@@ -418,62 +419,49 @@ impl DocumentView {
         let strs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let dropdown = gtk::DropDown::from_strings(&strs);
 
-        let win = self.window();
-        let dialog = adw::MessageDialog::new(
-            win.as_ref(),
-            Some(tr("sum_column_title")),
-            Some(tr("sum_column_body")),
-        );
-        dialog.set_extra_child(Some(&dropdown));
-        dialog.add_responses(&[("cancel", tr("cancel")), ("sum", tr("sum"))]);
-        dialog.set_default_response(Some("sum"));
-        dialog.set_response_appearance("sum", adw::ResponseAppearance::Suggested);
         let me = self.clone();
-        dialog.connect_response(None, move |_, resp| {
-            if resp != "sum" {
-                return;
-            }
-            let sel = dropdown.selected();
-            let Some(col) = names.get(sel as usize).cloned() else { return };
-            match me.state.dp.sum_column(&col) {
-                Ok((total, count)) => {
-                    let body = format!(
-                        "{}: {}\n({} {})",
-                        tr("total"),
-                        fmt_br(total),
-                        count,
-                        tr("numeric_values")
-                    );
-                    me.info(&format!("{} {col}", tr("sum")), &body);
+        let dropdown2 = dropdown.clone();
+        dialog::form(
+            self.window().as_ref(),
+            tr("sum_column_title"),
+            tr("sum_column_body"),
+            &dropdown,
+            tr("sum"),
+            move || {
+                let sel = dropdown2.selected();
+                let Some(col) = names.get(sel as usize).cloned() else { return };
+                match me.state.dp.sum_column(&col) {
+                    Ok((total, count)) => {
+                        let body = format!(
+                            "{}: {}\n({} {})",
+                            tr("total"),
+                            fmt_br(total),
+                            count,
+                            tr("numeric_values")
+                        );
+                        me.info(&format!("{} {col}", tr("sum")), &body);
+                    }
+                    Err(e) => me.error(&format!("{}\n{e}", tr("sum_failed"))),
                 }
-                Err(e) => me.error(&format!("{}\n{e}", tr("sum_failed"))),
-            }
-        });
-        dialog.present();
+            },
+        );
     }
 
     fn open_sql_dialog(self: &Rc<Self>) {
-        let win = self.window();
-        let dialog = adw::MessageDialog::new(
-            win.as_ref(),
-            Some(tr("sql_title")),
-            Some(tr("sql_body")),
-        );
         let entry = gtk::Entry::builder()
             .text("SELECT * FROM dados")
             .hexpand(true)
             .build();
-        dialog.set_extra_child(Some(&entry));
-        dialog.add_responses(&[("cancel", tr("cancel")), ("run", tr("run"))]);
-        dialog.set_default_response(Some("run"));
-        dialog.set_response_appearance("run", adw::ResponseAppearance::Suggested);
         let me = self.clone();
-        dialog.connect_response(None, move |_, resp| {
-            if resp == "run" {
-                me.run_sql(&entry.text());
-            }
-        });
-        dialog.present();
+        let entry2 = entry.clone();
+        dialog::form(
+            self.window().as_ref(),
+            tr("sql_title"),
+            tr("sql_body"),
+            &entry,
+            tr("run"),
+            move || me.run_sql(&entry2.text()),
+        );
     }
 
     fn do_save(self: &Rc<Self>) {
@@ -557,13 +545,11 @@ impl DocumentView {
     }
 
     fn info(&self, heading: &str, body: &str) {
-        let d = adw::MessageDialog::new(self.window().as_ref(), Some(heading), Some(body));
-        d.add_response("ok", tr("ok"));
-        d.present();
+        dialog::info(self.window().as_ref(), heading, body);
     }
 
     fn error(&self, body: &str) {
-        self.info(tr("error"), body);
+        dialog::error(self.window().as_ref(), body);
     }
 
     /// Recarrega a visão atual (mantendo o último filtro) após mudança estrutural.

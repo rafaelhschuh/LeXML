@@ -1,13 +1,18 @@
 # Lê-XML
 
 Leitor e editor de arquivos **XML em formato de tabela**, nativo para Linux
-(GTK4 + libadwaita). Abre o arquivo, mostra os dados numa grade estilo planilha
+(**GTK4 puro**). Abre o arquivo, mostra os dados numa grade estilo planilha
 e permite **pesquisar**, **filtrar com SQL**, **somar colunas**, **editar
 células**, **salvar de volta em `.xml`** (preservando a estrutura original) e
 **exportar CSV**.
 
 É leve e rápido: abre arquivos grandes (dezenas de milhares de linhas) quase
 instantaneamente.
+
+**Integração visual:** por usar GTK4 puro (sem libadwaita), o app **segue o
+tema do sistema** — cores, cor de destaque (accent) e variante clara/escura
+vêm do desktop (GNOME, Zorin OS etc.). Nas Configurações você ainda pode forçar
+**Claro** ou **Escuro**, ou deixar em **Seguir o sistema**.
 
 ---
 
@@ -47,7 +52,7 @@ preservados exatamente como estavam; apenas os dados das linhas são regravados.
 - [Guia de uso](docs/uso.md) — como abrir, pesquisar, filtrar, somar, editar,
   salvar e exportar.
 - [Build e empacotamento](docs/build-e-empacotamento.md) — compilar do código-fonte,
-  gerar o AppImage e controlar o tema (claro/escuro, KDE/GNOME).
+  gerar o AppImage e controlar o tema (Seguir o sistema / Claro / Escuro).
 
 ---
 

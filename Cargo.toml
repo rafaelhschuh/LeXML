@@ -1,13 +1,12 @@
 [package]
 name = "lexml-gtk"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Leitor e editor de arquivos XML em tabela, nativo GTK4/GNOME"
+description = "Leitor e editor de arquivos XML em tabela, nativo GTK4 (segue o tema do sistema)"
 license = "GPL-3.0-or-later"
 
 [dependencies]
 gtk = { version = "0.9", package = "gtk4", features = ["v4_12"] }
-adw = { version = "0.7", package = "libadwaita", features = ["v1_4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 quick-xml = "0.36"
 anyhow = "1"

@@ -67,27 +67,43 @@ for pat in "${REMOVE[@]}"; do
   rm -fv "$APPDIR"/usr/lib/$pat
 done
 
-# Tema: por padrão o app cede ao tema do sistema (Breeze no KDE / Adwaita no
-# GNOME) e segue claro/escuro. Acrescentamos controles de override ao final do
-# hook gtk: LEXML_LOOK (system|gnome) e LEXML_THEME (system|light|dark).
+# Tema: o app é GTK4 puro e deve SEGUIR o tema da DE ONDE FOR EXECUTADO (não a
+# de onde foi compilado). O plugin gtk, porém, força "GTK_THEME=Adwaita:variant"
+# ("Custom themes are broken") — isso ignora o tema do desktop. Sobrescrevemos
+# esse comportamento: o bloco abaixo é acrescentado ao FINAL do hook (roda depois
+# do plugin, então vence) e detecta, em tempo de execução, o tema da DE atual.
 HOOK="$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
-if [ -f "$HOOK" ] && ! grep -q 'Lê-XML: controle de tema' "$HOOK"; then
+if [ -f "$HOOK" ] && ! grep -q 'Lê-XML: tema da DE atual' "$HOOK"; then
 cat >> "$HOOK" <<'EOF'
 
-# ===== Lê-XML: controle de tema (override do usuário) =====
-# LEXML_LOOK = system (padrão, cede ao tema do desktop: Breeze no KDE / Adwaita
-#              no GNOME) | gnome (força aparência Adwaita/GNOME em qualquer DE)
-# LEXML_THEME = system (padrão, segue claro/escuro do desktop) | light | dark
-case "${LEXML_THEME:-system}" in
-  light) _LX_VARIANT=light;;
-  dark)  _LX_VARIANT=dark;;
-  *)     _LX_VARIANT="${GTK_THEME_VARIANT:-light}";;
+# ===== Lê-XML: tema da DE atual (executado, não compilado) =====
+# Reaproveita $GTK_THEME_VARIANT (claro/escuro) já calculado pelo plugin acima a
+# partir do portal/gsettings da máquina atual. Override manual: LEXML_THEME.
+case "${LEXML_THEME:-}" in
+  light) GTK_THEME_VARIANT="light";;
+  dark)  GTK_THEME_VARIANT="dark";;
 esac
-if [ "${LEXML_LOOK:-system}" = "gnome" ]; then
-  unset GTK_THEME            # libadwaita/Adwaita; claro-escuro via AdwStyleManager (código)
-else
-  export GTK_THEME="Adwaita:${_LX_VARIANT}"   # cede ao tema do sistema
-fi
+
+# 1) Nome do tema GTK da DE atual (GNOME/Zorin, Cinnamon, MATE, XFCE, KDE…).
+_lx_theme="$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null | tr -d "'\"")"
+[ -z "$_lx_theme" ] && _lx_theme="${GTK_THEME_NAME:-}"
+[ -z "$_lx_theme" ] && _lx_theme="Adwaita"
+
+# 2) Só usa o tema da DE se existir uma versão gtk-4.0 dele em algum local padrão
+#    (temas só-GTK3 fariam a GTK4 cair em Adwaita de qualquer forma).
+_lx_found=""
+for _d in "$HOME/.themes" "$HOME/.local/share/themes" /usr/share/themes /usr/local/share/themes; do
+  if [ -d "$_d/$_lx_theme/gtk-4.0" ]; then _lx_found="$_lx_theme"; break; fi
+done
+[ -z "$_lx_found" ] && _lx_found="Adwaita"
+
+# 3) Aplica o tema da DE (com a variante clara/escura). Independentemente disso, a
+#    GTK ainda carrega ~/.config/gtk-4.0/gtk.css da DE por cima (ex.: cores do KDE).
+export GTK_THEME="${_lx_found}${GTK_THEME_VARIANT:+:$GTK_THEME_VARIANT}"
+
+# 4) Garante que os temas/ícones do sistema atual sejam encontrados pela GTK do
+#    AppImage (acrescenta os diretórios de dados do host ao caminho de busca).
+export XDG_DATA_DIRS="${XDG_DATA_DIRS}:$HOME/.local/share:/usr/share:/usr/local/share"
 EOF
 fi
 

@@ -3,9 +3,9 @@
 ## Dependências
 
 - **Rust** (edição 2021) e Cargo.
-- **GTK4** e **libadwaita** com os pacotes de desenvolvimento:
-  - Fedora: `sudo dnf install gtk4-devel libadwaita-devel`
-  - Debian/Ubuntu: `sudo apt install libgtk-4-dev libadwaita-1-dev`
+- **GTK4** com os pacotes de desenvolvimento (o app é **GTK4 puro**, sem libadwaita):
+  - Fedora: `sudo dnf install gtk4-devel`
+  - Debian/Ubuntu: `sudo apt install libgtk-4-dev`
 - O SQLite é **compilado junto** (feature `bundled` do `rusqlite`) — não precisa
   de SQLite do sistema.
 
@@ -55,29 +55,32 @@ Isso gera `Lê-XML-x86_64.AppImage` na raiz do projeto. O script:
 
 ---
 
-## Controle de tema (claro/escuro e cara de KDE/GNOME)
+## Controle de tema (Seguir o sistema / Claro / Escuro)
 
-Por padrão o app **segue o sistema**: no KDE adota o visual do KDE (Breeze), no
-GNOME adota o Adwaita, e acompanha o modo claro/escuro do desktop. Você pode
-forçar via variáveis de ambiente:
+Por ser **GTK4 puro** (sem libadwaita), o app **segue o tema do sistema** — cores,
+**cor de destaque (accent)** e variante clara/escura vêm do desktop (GNOME, Zorin
+OS etc.). Em **Configurações → Geral → Esquema de cores** você escolhe entre
+**Seguir o sistema** (padrão), **Claro** ou **Escuro**; a escolha é salva.
 
-| Variável      | Valores                       | Efeito                                                        |
-|---------------|-------------------------------|--------------------------------------------------------------|
-| `LEXML_LOOK`  | `system` (padrão) \| `gnome`  | `gnome` força a aparência Adwaita/GNOME em qualquer desktop   |
-| `LEXML_THEME` | `system` (padrão) \| `light` \| `dark` | força modo claro ou escuro                          |
+Também é possível forçar claro/escuro por variável de ambiente:
+
+| Variável      | Valores                                | Efeito                          |
+|---------------|----------------------------------------|---------------------------------|
+| `LEXML_THEME` | `system` (padrão) \| `light` \| `dark` | força modo claro ou escuro      |
 
 Exemplos:
 
 ```bash
-LEXML_THEME=dark ./Lê-XML-x86_64.AppImage           # escuro, seguindo o desktop
-LEXML_THEME=light ./Lê-XML-x86_64.AppImage          # claro
-LEXML_LOOK=gnome ./Lê-XML-x86_64.AppImage           # cara de GNOME mesmo no KDE
-LEXML_LOOK=gnome LEXML_THEME=light ./Lê-XML-x86_64.AppImage
+LEXML_THEME=dark ./Lê-XML-x86_64.AppImage     # escuro
+LEXML_THEME=light ./Lê-XML-x86_64.AppImage    # claro
 ```
 
-No **binário nativo** (fora do AppImage), o `LEXML_THEME` controla claro/escuro;
-o visual é sempre Adwaita (libadwaita), seguindo o claro/escuro do sistema.
+> No **binário nativo** (fora do AppImage) a integração com o tema do sistema é
+> total. Dentro do **AppImage**, a GTK empacotada tenta localizar o tema do
+> sistema via `XDG_DATA_DIRS`; se o tema não estiver disponível, cai no tema GTK
+> padrão. Para integração visual completa e portátil, o caminho recomendado é o
+> **Flatpak** (planejado).
 
 Observação: os botões da janela (minimizar/maximizar/fechar) e a borda são
-desenhados pelo **gerenciador de janelas** do desktop (ex.: KWin no KDE), não
-pelo app — por isso eles sempre têm a cara do seu sistema.
+desenhados pelo **gerenciador de janelas** do desktop, não pelo app — por isso
+sempre têm a cara do seu sistema.

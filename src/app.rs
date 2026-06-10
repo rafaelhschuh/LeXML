@@ -1,10 +1,10 @@
 use crate::document::DocumentView;
 use crate::textdoc::TextDocView;
 use crate::xmldoc::XmlDoc;
-use crate::{config, i18n};
+use crate::{config, dialog, i18n};
 use crate::i18n::tr;
-use adw::prelude::*;
 use gtk::glib::clone;
+use gtk::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 const REPO_URL: &str = "https://github.com/rafaelhschuh/LeXML";
 const AUTHOR: &str = "Rafael H. Schuh";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Documento aberto: tabela (formato Datapacket) ou editor de texto simples.
 enum OpenDoc {
@@ -40,6 +41,42 @@ impl OpenDoc {
     }
 }
 
+/// Título de duas linhas para a HeaderBar (substitui `adw::WindowTitle`).
+#[derive(Clone)]
+struct TitleWidget {
+    container: gtk::Box,
+    title: gtk::Label,
+    subtitle: gtk::Label,
+}
+
+impl TitleWidget {
+    fn new(title: &str, subtitle: &str) -> Self {
+        let container = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .valign(gtk::Align::Center)
+            .build();
+        let title_lbl = gtk::Label::new(Some(title));
+        title_lbl.add_css_class("title");
+        title_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let subtitle_lbl = gtk::Label::new(Some(subtitle));
+        subtitle_lbl.add_css_class("subtitle");
+        subtitle_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        container.append(&title_lbl);
+        container.append(&subtitle_lbl);
+        Self {
+            container,
+            title: title_lbl,
+            subtitle: subtitle_lbl,
+        }
+    }
+
+    fn set(&self, title: &str, subtitle: &str) {
+        self.title.set_text(title);
+        self.subtitle.set_text(subtitle);
+        self.subtitle.set_visible(!subtitle.is_empty());
+    }
+}
+
 /// O que carregar ao criar a janela.
 pub enum Initial {
     Empty,
@@ -47,16 +84,15 @@ pub enum Initial {
     Blank,
 }
 
-pub fn build_window(app: &adw::Application, initial: Initial) -> adw::ApplicationWindow {
-    let window = adw::ApplicationWindow::builder()
+pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::ApplicationWindow {
+    let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Lê-XML")
         .default_width(1100)
         .default_height(700)
         .build();
 
-    let toolbar = adw::ToolbarView::new();
-    let header = adw::HeaderBar::new();
+    let header = gtk::HeaderBar::new();
 
     let open_btn = gtk::Button::from_icon_name("document-open-symbolic");
     open_btn.set_tooltip_text(Some(tr("open_new_window_tooltip")));
@@ -66,33 +102,22 @@ pub fn build_window(app: &adw::Application, initial: Initial) -> adw::Applicatio
     new_btn.set_tooltip_text(Some(tr("new_file_tooltip")));
     header.pack_start(&new_btn);
 
-    let title = adw::WindowTitle::new("Lê-XML", tr("app_subtitle"));
-    header.set_title_widget(Some(&title));
+    let title = TitleWidget::new("Lê-XML", tr("app_subtitle"));
+    header.set_title_widget(Some(&title.container));
 
-    // botão de configurações — abre uma JANELA flutuante (não um popover).
-    let settings_btn = gtk::Button::from_icon_name("emblem-system-symbolic");
+    // botão de configurações — abre uma JANELA flutuante com abas.
+    let settings_btn = gtk::Button::from_icon_name("preferences-system-symbolic");
     settings_btn.set_tooltip_text(Some(tr("settings")));
     settings_btn.connect_clicked(clone!(@weak window => move |_| show_settings(&window)));
     header.pack_end(&settings_btn);
 
-    toolbar.add_top_bar(&header);
+    window.set_titlebar(Some(&header));
 
     // pilha: vazio vs documento
     let stack = gtk::Stack::new();
-    let placeholder = adw::StatusPage::builder()
-        .icon_name("x-office-spreadsheet-symbolic")
-        .title(tr("no_file_open"))
-        .description(tr("no_file_desc"))
-        .build();
-    let open_center = gtk::Button::with_label(tr("open_file"));
-    open_center.add_css_class("pill");
-    open_center.add_css_class("suggested-action");
-    open_center.set_halign(gtk::Align::Center);
-    placeholder.set_child(Some(&open_center));
+    let (placeholder, open_center) = build_placeholder();
     stack.add_named(&placeholder, Some("empty"));
-    toolbar.set_content(Some(&stack));
-
-    window.set_content(Some(&toolbar));
+    window.set_child(Some(&stack));
 
     // mantém o documento vivo
     let current: Rc<RefCell<Option<OpenDoc>>> = Rc::new(RefCell::new(None));
@@ -167,29 +192,24 @@ pub fn build_window(app: &adw::Application, initial: Initial) -> adw::Applicatio
             if !dirty {
                 return glib::Propagation::Proceed;
             }
-            let dialog = adw::MessageDialog::new(
+            let alert = gtk::AlertDialog::builder()
+                .modal(true)
+                .message(tr("unsaved_title"))
+                .detail(tr("unsaved_body"))
+                .buttons([tr("cancel"), tr("close_without_saving"), tr("save_ellipsis")])
+                .cancel_button(0)
+                .default_button(2)
+                .build();
+            alert.choose(
                 Some(win),
-                Some(tr("unsaved_title")),
-                Some(tr("unsaved_body")),
-            );
-            dialog.add_responses(&[
-                ("cancel", tr("cancel")),
-                ("discard", tr("close_without_saving")),
-                ("save", tr("save_ellipsis")),
-            ]);
-            dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-            dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-            dialog.set_default_response(Some("save"));
-            dialog.set_close_response("cancel");
-            dialog.connect_response(
-                None,
-                clone!(@strong current, @strong confirmed_close, @weak win => move |_, resp| {
-                    match resp {
-                        "discard" => {
+                gio::Cancellable::NONE,
+                clone!(@strong current, @strong confirmed_close, @weak win => move |res| {
+                    match res.unwrap_or(0) {
+                        1 => {
                             confirmed_close.set(true);
                             win.close();
                         }
-                        "save" => {
+                        2 => {
                             if let Some(doc) = current.borrow().as_ref() {
                                 doc.save_then(clone!(@strong confirmed_close, @weak win => move |ok| {
                                     if ok {
@@ -203,7 +223,6 @@ pub fn build_window(app: &adw::Application, initial: Initial) -> adw::Applicatio
                     }
                 }),
             );
-            dialog.present();
             glib::Propagation::Stop
         }
     ));
@@ -217,13 +236,54 @@ pub fn build_window(app: &adw::Application, initial: Initial) -> adw::Applicatio
     window
 }
 
+/// Página inicial "Nenhum arquivo aberto" (substitui `adw::StatusPage`).
+fn build_placeholder() -> (gtk::Box, gtk::Button) {
+    let page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+
+    let icon = gtk::Image::from_icon_name("x-office-spreadsheet-symbolic");
+    icon.set_pixel_size(96);
+    icon.add_css_class("dim-label");
+    page.append(&icon);
+
+    let title = gtk::Label::new(None);
+    title.set_markup(&format!(
+        "<span size='xx-large' weight='bold'>{}</span>",
+        glib::markup_escape_text(tr("no_file_open"))
+    ));
+    page.append(&title);
+
+    let desc = gtk::Label::builder()
+        .label(tr("no_file_desc"))
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .build();
+    desc.add_css_class("dim-label");
+    page.append(&desc);
+
+    let open_center = gtk::Button::with_label(tr("open_file"));
+    open_center.add_css_class("suggested-action");
+    open_center.add_css_class("pill");
+    open_center.set_halign(gtk::Align::Center);
+    open_center.set_margin_top(6);
+    page.append(&open_center);
+
+    (page, open_center)
+}
+
 /// Substitui o documento exibido na pilha e atualiza título/estado.
 fn install_doc(
     doc: OpenDoc,
-    window: &adw::ApplicationWindow,
+    window: &gtk::ApplicationWindow,
     stack: &gtk::Stack,
     current: &Rc<RefCell<Option<OpenDoc>>>,
-    title: &adw::WindowTitle,
+    title: &TitleWidget,
     file_label: &str,
 ) {
     if let Some(child) = stack.child_by_name("doc") {
@@ -235,17 +295,16 @@ fn install_doc(
     *current.borrow_mut() = Some(doc);
 
     // título: nome do arquivo em cima, nome do app embaixo (só com arquivo aberto)
-    title.set_title(file_label);
-    title.set_subtitle("Lê-XML");
+    title.set(file_label, "Lê-XML");
     window.set_title(Some(&format!("{file_label} — Lê-XML")));
 }
 
 fn open_into(
     path: &Path,
-    window: &adw::ApplicationWindow,
+    window: &gtk::ApplicationWindow,
     stack: &gtk::Stack,
     current: &Rc<RefCell<Option<OpenDoc>>>,
-    title: &adw::WindowTitle,
+    title: &TitleWidget,
 ) {
     let doc = match XmlDoc::open(path) {
         Ok(dp) => OpenDoc::Table(DocumentView::new(dp, path.to_path_buf())),
@@ -265,91 +324,90 @@ fn open_into(
 }
 
 fn blank_into(
-    window: &adw::ApplicationWindow,
+    window: &gtk::ApplicationWindow,
     stack: &gtk::Stack,
     current: &Rc<RefCell<Option<OpenDoc>>>,
-    title: &adw::WindowTitle,
+    title: &TitleWidget,
 ) {
     match XmlDoc::new_empty() {
         Ok(dp) => {
             let doc = OpenDoc::Table(DocumentView::new(dp, PathBuf::from("novo.xml")));
             install_doc(doc, window, stack, current, title, "novo.xml");
         }
-        Err(e) => {
-            let d = adw::MessageDialog::new(Some(window), Some(tr("error")), Some(&e.to_string()));
-            d.add_response("ok", tr("ok"));
-            d.present();
-        }
+        Err(e) => dialog::error(Some(window.upcast_ref()), &e.to_string()),
     }
 }
 
-/// Aplica o esquema de cores. O app é SEMPRE Adwaita (GNOME) — nunca mexemos em
-/// gtk-theme-name. Só alternamos claro/escuro, de forma FIXA (independente do
-/// sistema): ForceLight ou ForceDark. Qualquer valor != "dark" vira claro.
-fn apply_theme(scheme_str: &str) {
-    use adw::ColorScheme;
-    let scheme = if scheme_str == "dark" {
-        ColorScheme::ForceDark
-    } else {
-        ColorScheme::ForceLight
-    };
-    adw::StyleManager::default().set_color_scheme(scheme);
+/// Aplica o esquema de cores em GTK4 puro. Sem libadwaita, o app herda o tema
+/// do sistema (e a cor de destaque dele). Só sobrepomos claro/escuro quando o
+/// usuário escolhe explicitamente; em "system" deixamos o GTK seguir o desktop.
+fn apply_theme(scheme: &str) {
+    let Some(settings) = gtk::Settings::default() else { return };
+    match scheme {
+        "dark" => settings.set_gtk_application_prefer_dark_theme(true),
+        "light" => settings.set_gtk_application_prefer_dark_theme(false),
+        _ => {} // system: não sobrepõe — o GTK segue o tema/portal do desktop
+    }
 }
 
-/// Aplica a aparência de plataforma (tema de widgets GTK).
-/// Janela de configurações FLUTUANTE com abas (igual à janela "Sobre"):
-/// uma `adw::PreferencesWindow` com as páginas Geral, Tema e Sobre.
-fn show_settings(parent: &adw::ApplicationWindow) {
+/// Janela de configurações FLUTUANTE com abas (Notebook), em GTK4 puro.
+fn show_settings(parent: &gtk::ApplicationWindow) {
     let cfg = config::load();
 
-    let win = adw::PreferencesWindow::builder()
+    let win = gtk::Window::builder()
         .title(tr("settings"))
         .transient_for(parent)
         .modal(true)
-        .search_enabled(false)
-        .default_width(440)
+        .resizable(false)
+        .default_width(460)
         .default_height(420)
         .build();
 
-    // ---------- Aba: Geral (idioma) ----------
-    let geral = adw::PreferencesPage::builder()
-        .title(tr("general"))
-        .icon_name("preferences-system-symbolic")
+    let notebook = gtk::Notebook::new();
+
+    // ---------- Aba: Geral (idioma + tema) ----------
+    let geral = settings_page();
+
+    let lang_dd = gtk::DropDown::from_strings(&["Português", "English"]);
+    lang_dd.set_selected(if cfg.lang.starts_with("en") { 1 } else { 0 });
+    geral.append(&pref_row(tr("language"), &lang_dd));
+
+    let theme_dd = gtk::DropDown::from_strings(&[
+        tr("theme_system"),
+        tr("theme_light"),
+        tr("theme_dark"),
+    ]);
+    theme_dd.set_selected(match cfg.theme.as_str() {
+        "light" => 1,
+        "dark" => 2,
+        _ => 0,
+    });
+    geral.append(&pref_row(tr("color_scheme"), &theme_dd));
+
+    let note = gtk::Label::builder()
+        .label(tr("lang_restart_note"))
+        .wrap(true)
+        .xalign(0.0)
+        .margin_top(6)
         .build();
-    let g_group = adw::PreferencesGroup::builder().build();
-    let lang_combo = adw::ComboRow::builder()
-        .title(tr("language"))
-        .model(&gtk::StringList::new(&["Português", "English"]))
-        .build();
-    lang_combo.set_selected(if cfg.lang.starts_with("en") { 1 } else { 0 });
-    g_group.add(&lang_combo);
+    note.add_css_class("dim-label");
+    geral.append(&note);
 
-    // Tema (claro/escuro, fixo) — agora na mesma aba Geral
-    let theme_combo = adw::ComboRow::builder()
-        .title(tr("color_scheme"))
-        .model(&gtk::StringList::new(&[tr("theme_light"), tr("theme_dark")]))
-        .build();
-    theme_combo.set_selected(if cfg.theme == "dark" { 1 } else { 0 });
-    g_group.add(&theme_combo);
+    notebook.append_page(&geral, Some(&gtk::Label::new(Some(tr("general")))));
 
-    geral.add(&g_group);
-    win.add(&geral);
+    lang_dd.connect_selected_notify(move |dd| {
+        let code = if dd.selected() == 1 { "en" } else { "pt" };
+        let mut c = config::load();
+        c.lang = code.to_string();
+        config::save(&c);
+    });
 
-    {
-        let win = win.downgrade();
-        lang_combo.connect_selected_notify(move |r| {
-            let code = if r.selected() == 1 { "en" } else { "pt" };
-            let mut c = config::load();
-            c.lang = code.to_string();
-            config::save(&c);
-            if let Some(w) = win.upgrade() {
-                w.add_toast(adw::Toast::new(tr("lang_restart_note")));
-            }
-        });
-    }
-
-    theme_combo.connect_selected_notify(move |r| {
-        let val = if r.selected() == 1 { "dark" } else { "light" };
+    theme_dd.connect_selected_notify(move |dd| {
+        let val = match dd.selected() {
+            1 => "light",
+            2 => "dark",
+            _ => "system",
+        };
         apply_theme(val);
         let mut c = config::load();
         c.theme = val.to_string();
@@ -357,38 +415,86 @@ fn show_settings(parent: &adw::ApplicationWindow) {
     });
 
     // ---------- Aba: Sobre ----------
-    let sobre = adw::PreferencesPage::builder()
-        .title(tr("about"))
-        .icon_name("help-about-symbolic")
+    let sobre = settings_page();
+
+    let app_name = gtk::Label::new(None);
+    app_name.set_markup("<span size='x-large' weight='bold'>Lê-XML</span>");
+    app_name.set_xalign(0.0);
+    sobre.append(&app_name);
+
+    let desc = gtk::Label::builder()
+        .label(tr("about_desc"))
+        .wrap(true)
+        .xalign(0.0)
         .build();
-    let s_group = adw::PreferencesGroup::builder().title("Lê-XML").build();
-    let desc_row = adw::ActionRow::builder()
-        .title(tr("about_desc"))
+    desc.add_css_class("dim-label");
+    sobre.append(&desc);
+
+    sobre.append(&info_row("Versão", VERSION));
+    sobre.append(&info_row(tr("author"), AUTHOR));
+
+    let repo_btn = gtk::Button::builder()
+        .label(REPO_URL)
+        .halign(gtk::Align::Start)
+        .margin_top(6)
         .build();
-    desc_row.set_title_lines(0);
-    s_group.add(&desc_row);
-    let ver_row = adw::ActionRow::builder().title("Versão").subtitle("0.2.0").build();
-    s_group.add(&ver_row);
-    let author_row = adw::ActionRow::builder().title(tr("author")).subtitle(AUTHOR).build();
-    s_group.add(&author_row);
-    let repo_row = adw::ActionRow::builder()
-        .title(tr("repository"))
-        .subtitle(REPO_URL)
-        .activatable(true)
-        .build();
-    repo_row.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
-    repo_row.connect_activated(|_| {
+    repo_btn.add_css_class("link");
+    repo_btn.connect_clicked(|_| {
         gtk::UriLauncher::new(REPO_URL).launch(
             gtk::Window::NONE,
             gio::Cancellable::NONE,
             |_| {},
         );
     });
-    s_group.add(&repo_row);
-    sobre.add(&s_group);
-    win.add(&sobre);
+    sobre.append(&info_row(tr("repository"), ""));
+    sobre.append(&repo_btn);
 
+    notebook.append_page(&sobre, Some(&gtk::Label::new(Some(tr("about")))));
+
+    win.set_child(Some(&notebook));
     win.present();
+}
+
+/// Container vertical com margens, usado como página de uma aba de configurações.
+fn settings_page() -> gtk::Box {
+    gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .margin_top(18)
+        .margin_bottom(18)
+        .margin_start(18)
+        .margin_end(18)
+        .build()
+}
+
+/// Linha "rótulo … widget" (rótulo à esquerda, controle à direita).
+fn pref_row(label: &str, widget: &impl IsA<gtk::Widget>) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .build();
+    let lbl = gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build();
+    row.append(&lbl);
+    widget.set_halign(gtk::Align::End);
+    widget.set_valign(gtk::Align::Center);
+    row.append(widget);
+    row
+}
+
+/// Linha de informação "rótulo: valor" (somente leitura).
+fn info_row(label: &str, value: &str) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .build();
+    let lbl = gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build();
+    row.append(&lbl);
+    if !value.is_empty() {
+        let val = gtk::Label::builder().label(value).xalign(1.0).build();
+        val.add_css_class("dim-label");
+        row.append(&val);
+    }
+    row
 }
 
 pub fn run() -> glib::ExitCode {
@@ -396,18 +502,19 @@ pub fn run() -> glib::ExitCode {
     let cfg = config::load();
     i18n::set_lang(i18n::from_code(&cfg.lang));
 
-    let app = adw::Application::builder()
+    let app = gtk::Application::builder()
         .application_id("com.empresa.lexml")
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
 
     let theme = cfg.theme.clone();
     app.connect_startup(move |_| {
-        // App é sempre Adwaita (GNOME). Só claro/escuro, fixo (independente do
-        // sistema). LEXML_THEME sobrepõe a configuração salva.
+        // GTK4 puro: o app segue o tema (e cor de destaque) do sistema. Só
+        // sobrepomos claro/escuro quando configurado. LEXML_THEME sobrepõe.
         match std::env::var("LEXML_THEME").as_deref() {
             Ok("dark") => apply_theme("dark"),
             Ok("light") => apply_theme("light"),
+            Ok("system") => apply_theme("system"),
             _ => apply_theme(&theme),
         }
     });

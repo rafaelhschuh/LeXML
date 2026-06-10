@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod dialog;
 mod i18n;
 mod xmldoc;
 mod document;
