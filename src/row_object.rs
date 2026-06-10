@@ -57,4 +57,17 @@ impl RowObject {
             *slot = val;
         }
     }
+
+    /// Acrescenta um valor ao final (usado ao adicionar uma coluna).
+    pub fn push_value(&self, val: String) {
+        self.imp().values.borrow_mut().push(val);
+    }
+
+    /// Remove o valor de índice `idx` (usado ao excluir uma coluna).
+    pub fn remove_value(&self, idx: usize) {
+        let mut v = self.imp().values.borrow_mut();
+        if idx < v.len() {
+            v.remove(idx);
+        }
+    }
 }

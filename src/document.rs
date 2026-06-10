@@ -1,9 +1,10 @@
 use crate::xmldoc::{XmlDoc, QueryResult};
 use crate::row_object::RowObject;
+use crate::i18n::tr;
 use adw::prelude::*;
 use gtk::glib::{self, clone};
-use gtk::gio;
-use std::cell::RefCell;
+use gtk::{gdk, gio};
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -14,6 +15,7 @@ struct State {
     editable: RefCell<bool>,
     dirty: RefCell<bool>,
     path: PathBuf,
+    last_filter: RefCell<String>, // último WHERE aplicado (para recarregar)
 }
 
 pub struct DocumentView {
@@ -24,6 +26,9 @@ pub struct DocumentView {
     colview: gtk::ColumnView,
     status: gtk::Label,
     find_entry: gtk::SearchEntry,
+    menu: gtk::PopoverMenu,
+    ctx_rowid: Cell<i64>,
+    ctx_col: Cell<usize>,
 }
 
 impl DocumentView {
@@ -34,6 +39,7 @@ impl DocumentView {
             editable: RefCell::new(true),
             dirty: RefCell::new(false),
             path,
+            last_filter: RefCell::new(String::new()),
         });
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -49,35 +55,35 @@ impl DocumentView {
             .build();
 
         let find_entry = gtk::SearchEntry::builder()
-            .placeholder_text("Localizar…")
+            .placeholder_text(tr("find_placeholder"))
             .width_chars(18)
             .build();
         bar.append(&find_entry);
 
         let filter_entry = gtk::Entry::builder()
-            .placeholder_text("Filtrar (SQL WHERE) — ex: valor <> '0.00'")
+            .placeholder_text(tr("filter_placeholder"))
             .hexpand(true)
             .build();
         bar.append(&filter_entry);
 
         let filter_btn = gtk::Button::from_icon_name("system-search-symbolic");
-        filter_btn.set_tooltip_text(Some("Aplicar filtro (WHERE)"));
+        filter_btn.set_tooltip_text(Some(tr("filter_tooltip")));
         bar.append(&filter_btn);
 
         let sql_btn = gtk::Button::with_label("SQL…");
-        sql_btn.set_tooltip_text(Some("Consulta SQL completa (somente leitura)"));
+        sql_btn.set_tooltip_text(Some(tr("sql_tooltip")));
         bar.append(&sql_btn);
 
-        let sum_btn = gtk::Button::with_label("Σ Somar");
-        sum_btn.set_tooltip_text(Some("Somar uma coluna"));
+        let sum_btn = gtk::Button::with_label(tr("sum_label"));
+        sum_btn.set_tooltip_text(Some(tr("sum_tooltip")));
         bar.append(&sum_btn);
 
         let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
-        save_btn.set_tooltip_text(Some("Salvar como .xml"));
+        save_btn.set_tooltip_text(Some(tr("save_tooltip")));
         bar.append(&save_btn);
 
         let csv_btn = gtk::Button::from_icon_name("x-office-spreadsheet-symbolic");
-        csv_btn.set_tooltip_text(Some("Exportar CSV"));
+        csv_btn.set_tooltip_text(Some(tr("csv_tooltip")));
         bar.append(&csv_btn);
 
         root.append(&bar);
@@ -107,6 +113,23 @@ impl DocumentView {
         status.add_css_class("dim-label");
         root.append(&status);
 
+        // ---------- menu de contexto (botão direito) ----------
+        let menu_model = gio::Menu::new();
+        let sec_rows = gio::Menu::new();
+        sec_rows.append(Some(tr("ctx_row_above")), Some("doc.row-above"));
+        sec_rows.append(Some(tr("ctx_row_below")), Some("doc.row-below"));
+        sec_rows.append(Some(tr("ctx_row_delete")), Some("doc.row-delete"));
+        menu_model.append_section(None, &sec_rows);
+        let sec_cols = gio::Menu::new();
+        sec_cols.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
+        sec_cols.append(Some(tr("ctx_col_add")), Some("doc.col-add"));
+        sec_cols.append(Some(tr("ctx_col_delete")), Some("doc.col-delete"));
+        menu_model.append_section(None, &sec_cols);
+        let menu = gtk::PopoverMenu::from_model(Some(&menu_model));
+        menu.set_parent(&colview);
+        menu.set_has_arrow(false);
+        menu.set_halign(gtk::Align::Start);
+
         let me = Rc::new(Self {
             root,
             state,
@@ -115,7 +138,25 @@ impl DocumentView {
             colview,
             status,
             find_entry: find_entry.clone(),
+            menu,
+            ctx_rowid: Cell::new(-1),
+            ctx_col: Cell::new(0),
         });
+
+        // ações do menu de contexto
+        let actions = gio::SimpleActionGroup::new();
+        let mk = |name: &str, f: Box<dyn Fn()>| {
+            let a = gio::SimpleAction::new(name, None);
+            a.connect_activate(move |_, _| f());
+            a
+        };
+        actions.add_action(&mk("row-above", Box::new(clone!(@strong me => move || me.ctx_insert_row(true)))));
+        actions.add_action(&mk("row-below", Box::new(clone!(@strong me => move || me.ctx_insert_row(false)))));
+        actions.add_action(&mk("row-delete", Box::new(clone!(@strong me => move || me.ctx_delete_row()))));
+        actions.add_action(&mk("col-sum", Box::new(clone!(@strong me => move || me.ctx_sum_column()))));
+        actions.add_action(&mk("col-add", Box::new(clone!(@strong me => move || me.ctx_add_column()))));
+        actions.add_action(&mk("col-delete", Box::new(clone!(@strong me => move || me.ctx_delete_column()))));
+        me.root.insert_action_group("doc", Some(&actions));
 
         // ---------- conexões ----------
         let apply_filter = clone!(@strong me, @weak filter_entry => move || {
@@ -145,6 +186,7 @@ impl DocumentView {
         match self.state.dp.filter(Some(where_clause)) {
             Ok(res) => {
                 *self.state.editable.borrow_mut() = true;
+                *self.state.last_filter.borrow_mut() = where_clause.to_string();
                 self.load_result(&res, true);
                 let n = res.rows.len();
                 let extra = if where_clause.trim().is_empty() {
@@ -154,7 +196,7 @@ impl DocumentView {
                 };
                 self.status.set_text(&format!("Total: {n}{extra}"));
             }
-            Err(e) => self.error(&format!("Erro no filtro SQL:\n{e}")),
+            Err(e) => self.error(&format!("{}\n{e}", tr("filter_error"))),
         }
     }
 
@@ -167,7 +209,7 @@ impl DocumentView {
                 self.status
                     .set_text(&format!("Total: {n}  ·  SQL (somente leitura): {sql}"));
             }
-            Err(e) => self.error(&format!("Erro SQL:\n{e}")),
+            Err(e) => self.error(&format!("{}\n{e}", tr("sql_error"))),
         }
     }
 
@@ -178,7 +220,7 @@ impl DocumentView {
             .columns
             .iter()
             .enumerate()
-            .filter(|(i, _)| Some(*i) != rid_idx)
+            .filter(|(_, c)| *c != "_rid" && *c != "__ord")
             .map(|(i, c)| (i, c.clone()))
             .collect();
         let vis_names: Vec<String> = visible.iter().map(|(_, c)| c.clone()).collect();
@@ -225,6 +267,35 @@ impl DocumentView {
                 label.set_max_width_chars(60);
                 list_item.set_child(Some(&label));
 
+                // menu de contexto (botão direito) sensível à linha/coluna
+                let me_ctx = me.clone();
+                let li_ctx = list_item.clone();
+                let gesture = gtk::GestureClick::new();
+                gesture.set_button(gdk::BUTTON_SECONDARY);
+                // Capture + claim: intercepta o clique antes do GtkText interno do
+                // EditableLabel, evitando que apareça o menu padrão (copiar/colar).
+                gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+                gesture.connect_pressed(move |g, _, x, y| {
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                    if let Some(item) = li_ctx.item() {
+                        if let Ok(row) = item.downcast::<RowObject>() {
+                            me_ctx.ctx_rowid.set(row.rowid());
+                        }
+                    }
+                    me_ctx.ctx_col.set(col_idx);
+                    if let Some(w) = g.widget() {
+                        if let Some(p) = w.compute_point(
+                            &me_ctx.colview,
+                            &gtk::graphene::Point::new(x as f32, y as f32),
+                        ) {
+                            let rect = gdk::Rectangle::new(p.x() as i32, p.y() as i32, 1, 1);
+                            me_ctx.menu.set_pointing_to(Some(&rect));
+                        }
+                    }
+                    me_ctx.menu.popup();
+                });
+                label.add_controller(gesture);
+
                 // commit ao terminar edição
                 let me2 = me.clone();
                 let li = list_item.clone();
@@ -242,7 +313,7 @@ impl DocumentView {
                     if *me2.state.editable.borrow() && row.rowid() >= 0 {
                         let col_name = me2.state.columns.borrow()[col_idx].clone();
                         if let Err(e) = me2.state.dp.update_cell(row.rowid(), &col_name, &new_val) {
-                            me2.error(&format!("Erro ao gravar célula:\n{e}"));
+                            me2.error(&format!("{}\n{e}", tr("cell_write_error")));
                         } else {
                             *me2.state.dirty.borrow_mut() = true;
                         }
@@ -267,6 +338,49 @@ impl DocumentView {
             column.set_resizable(true);
             self.colview.append_column(&column);
         }
+
+        // arma rename inline ao dar duplo-clique no cabeçalho de cada coluna
+        self.arm_header_rename();
+    }
+
+    /// Após (re)criar as colunas, percorre a árvore de widgets para localizar os
+    /// títulos de cabeçalho e arma o rename inline (duplo-clique → campo editável).
+    fn arm_header_rename(self: &Rc<Self>) {
+        let me = self.clone();
+        let colview = self.colview.clone();
+        glib::idle_add_local_once(move || {
+            arm_titles(&colview.clone().upcast::<gtk::Widget>(), &me);
+        });
+    }
+
+    /// Abre um campo de edição inline ancorado no título da coluna.
+    fn open_rename_popover(self: &Rc<Self>, anchor: &gtk::Widget, old_name: &str) {
+        let pop = gtk::Popover::new();
+        pop.set_autohide(true);
+        pop.set_parent(anchor);
+        let entry = gtk::Entry::builder().text(old_name).build();
+        pop.set_child(Some(&entry));
+
+        let me = self.clone();
+        let old = old_name.to_string();
+        let popc = pop.clone();
+        entry.connect_activate(move |e| {
+            let new = e.text().to_string();
+            popc.popdown();
+            if new.trim().is_empty() || new == old {
+                return;
+            }
+            match me.state.dp.rename_column(&old, &new) {
+                Ok(()) => {
+                    *me.state.dirty.borrow_mut() = true;
+                    me.reload();
+                }
+                Err(err) => me.error(&format!("{}\n{err}", tr("column_op_error"))),
+            }
+        });
+        pop.connect_closed(|p| p.unparent());
+        pop.popup();
+        entry.grab_focus();
     }
 
     fn find_next(&self, needle: &str) {
@@ -307,11 +421,11 @@ impl DocumentView {
         let win = self.window();
         let dialog = adw::MessageDialog::new(
             win.as_ref(),
-            Some("Somar coluna"),
-            Some("Escolha a coluna a somar:"),
+            Some(tr("sum_column_title")),
+            Some(tr("sum_column_body")),
         );
         dialog.set_extra_child(Some(&dropdown));
-        dialog.add_responses(&[("cancel", "Cancelar"), ("sum", "Somar")]);
+        dialog.add_responses(&[("cancel", tr("cancel")), ("sum", tr("sum"))]);
         dialog.set_default_response(Some("sum"));
         dialog.set_response_appearance("sum", adw::ResponseAppearance::Suggested);
         let me = self.clone();
@@ -323,11 +437,16 @@ impl DocumentView {
             let Some(col) = names.get(sel as usize).cloned() else { return };
             match me.state.dp.sum_column(&col) {
                 Ok((total, count)) => {
-                    let body =
-                        format!("Total: {}\n({} valor(es) numérico(s))", fmt_br(total), count);
-                    me.info(&format!("Soma de {col}"), &body);
+                    let body = format!(
+                        "{}: {}\n({} {})",
+                        tr("total"),
+                        fmt_br(total),
+                        count,
+                        tr("numeric_values")
+                    );
+                    me.info(&format!("{} {col}", tr("sum")), &body);
                 }
-                Err(e) => me.error(&format!("Não foi possível somar:\n{e}")),
+                Err(e) => me.error(&format!("{}\n{e}", tr("sum_failed"))),
             }
         });
         dialog.present();
@@ -337,15 +456,15 @@ impl DocumentView {
         let win = self.window();
         let dialog = adw::MessageDialog::new(
             win.as_ref(),
-            Some("Consulta SQL"),
-            Some("Tabela: dados — resultado somente leitura."),
+            Some(tr("sql_title")),
+            Some(tr("sql_body")),
         );
         let entry = gtk::Entry::builder()
             .text("SELECT * FROM dados")
             .hexpand(true)
             .build();
         dialog.set_extra_child(Some(&entry));
-        dialog.add_responses(&[("cancel", "Cancelar"), ("run", "Executar")]);
+        dialog.add_responses(&[("cancel", tr("cancel")), ("run", tr("run"))]);
         dialog.set_default_response(Some("run"));
         dialog.set_response_appearance("run", adw::ResponseAppearance::Suggested);
         let me = self.clone();
@@ -371,7 +490,7 @@ impl DocumentView {
     /// cancelou ou houve erro) — usado para encadear o fechamento da janela.
     pub fn save_then(self: &Rc<Self>, after: impl FnOnce(bool) + 'static) {
         let dialog = gtk::FileDialog::builder()
-            .title("Salvar como .xml")
+            .title(tr("save_as_xml"))
             .initial_name(
                 self.state
                     .path
@@ -388,10 +507,10 @@ impl DocumentView {
                     match me.state.dp.save(&path) {
                         Ok(()) => {
                             *me.state.dirty.borrow_mut() = false;
-                            me.status.set_text(&format!("Salvo em {}", path.display()));
+                            me.status.set_text(&format!("{}: {}", tr("save_tooltip"), path.display()));
                             ok = true;
                         }
-                        Err(e) => me.error(&format!("Erro ao salvar:\n{e}")),
+                        Err(e) => me.error(&format!("{}\n{e}", tr("save_error"))),
                     }
                 }
             }
@@ -405,21 +524,28 @@ impl DocumentView {
         let res = match self.state.dp.filter(Some(where_or_all)) {
             Ok(r) => r,
             Err(e) => {
-                self.error(&format!("Erro ao montar CSV:\n{e}"));
+                self.error(&format!("{}\n{e}", tr("csv_export_error")));
                 return;
             }
         };
+        // preserva o nome original do arquivo, trocando a extensão para .csv
+        let initial = self
+            .state
+            .path
+            .file_stem()
+            .map(|s| format!("{}.csv", s.to_string_lossy()))
+            .unwrap_or_else(|| "export.csv".into());
         let dialog = gtk::FileDialog::builder()
-            .title("Exportar CSV")
-            .initial_name("export.csv")
+            .title(tr("export_csv_title"))
+            .initial_name(initial)
             .build();
         let me = self.clone();
         dialog.save(self.window().as_ref(), gio::Cancellable::NONE, move |r| {
             if let Ok(file) = r {
                 if let Some(path) = file.path() {
                     match me.state.dp.export_csv(&path, &res) {
-                        Ok(()) => me.status.set_text(&format!("CSV exportado: {}", path.display())),
-                        Err(e) => me.error(&format!("Erro ao exportar CSV:\n{e}")),
+                        Ok(()) => me.status.set_text(&format!("CSV: {}", path.display())),
+                        Err(e) => me.error(&format!("{}\n{e}", tr("csv_export_error"))),
                     }
                 }
             }
@@ -432,13 +558,206 @@ impl DocumentView {
 
     fn info(&self, heading: &str, body: &str) {
         let d = adw::MessageDialog::new(self.window().as_ref(), Some(heading), Some(body));
-        d.add_response("ok", "OK");
+        d.add_response("ok", tr("ok"));
         d.present();
     }
 
     fn error(&self, body: &str) {
-        self.info("Erro", body);
+        self.info(tr("error"), body);
     }
+
+    /// Recarrega a visão atual (mantendo o último filtro) após mudança estrutural.
+    fn reload(self: &Rc<Self>) {
+        let where_clause = self.state.last_filter.borrow().clone();
+        self.apply_filter(&where_clause);
+    }
+
+    /// Localiza a posição de um `rowid` dentro do store (varredura linear barata).
+    fn row_position(&self, rowid: i64) -> Option<u32> {
+        let n = self.store.n_items();
+        for i in 0..n {
+            if let Some(obj) = self.store.item(i) {
+                if obj.downcast::<RowObject>().unwrap().rowid() == rowid {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Atualiza o rodapé com a contagem atual do store (sem re-consultar o banco).
+    fn refresh_status(&self) {
+        let n = self.store.n_items();
+        let f = self.state.last_filter.borrow();
+        let extra = if f.trim().is_empty() {
+            String::new()
+        } else {
+            format!("  ·  filtro: {f}")
+        };
+        self.status.set_text(&format!("Total: {n}{extra}"));
+    }
+
+    // ---------- ações do menu de contexto ----------
+
+    fn ctx_insert_row(self: &Rc<Self>, above: bool) {
+        if !*self.state.editable.borrow() {
+            return; // visão somente leitura (SQL livre)
+        }
+        let rid = self.ctx_rowid.get();
+        if rid < 0 {
+            return;
+        }
+        match self.state.dp.insert_row_relative(rid, above) {
+            Ok(new_rid) => {
+                *self.state.dirty.borrow_mut() = true;
+                // insere apenas a nova linha no store (sem re-consultar 50k linhas)
+                let ncol = self.state.columns.borrow().len();
+                let obj = RowObject::new(new_rid, vec![String::new(); ncol], true);
+                let pos = self.row_position(rid).unwrap_or(self.store.n_items());
+                let at = if above { pos } else { pos + 1 };
+                self.store.insert(at, &obj);
+                self.refresh_status();
+                self.selection.set_selected(at);
+                self.colview.scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
+            }
+            Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
+        }
+    }
+
+    fn ctx_delete_row(self: &Rc<Self>) {
+        if !*self.state.editable.borrow() {
+            return;
+        }
+        let rid = self.ctx_rowid.get();
+        if rid < 0 {
+            return;
+        }
+        match self.state.dp.delete_row(rid) {
+            Ok(()) => {
+                *self.state.dirty.borrow_mut() = true;
+                // remove apenas a linha do store (sem re-consultar)
+                if let Some(pos) = self.row_position(rid) {
+                    self.store.remove(pos);
+                }
+                self.refresh_status();
+            }
+            Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
+        }
+    }
+
+    fn ctx_add_column(self: &Rc<Self>) {
+        if !*self.state.editable.borrow() {
+            return;
+        }
+        // nome padrão único; o usuário renomeia inline depois (duplo-clique no cabeçalho)
+        let existing = self.state.columns.borrow().clone();
+        let mut n = existing.len() + 1;
+        let mut name = format!("coluna{n}");
+        while existing.iter().any(|c| c == &name) {
+            n += 1;
+            name = format!("coluna{n}");
+        }
+        match self.state.dp.add_column(&name) {
+            Ok(()) => {
+                *self.state.dirty.borrow_mut() = true;
+                // acrescenta um valor vazio em cada RowObject já carregado (sem re-query)
+                let cnt = self.store.n_items();
+                for i in 0..cnt {
+                    if let Some(obj) = self.store.item(i) {
+                        obj.downcast::<RowObject>().unwrap().push_value(String::new());
+                    }
+                }
+                self.state.columns.borrow_mut().push(name);
+                let names = self.state.columns.borrow().clone();
+                self.rebuild_columns(&names);
+            }
+            Err(e) => self.error(&format!("{}\n{e}", tr("column_op_error"))),
+        }
+    }
+
+    fn ctx_delete_column(self: &Rc<Self>) {
+        if !*self.state.editable.borrow() {
+            return;
+        }
+        let col = self.ctx_col.get();
+        let name = self.state.columns.borrow().get(col).cloned();
+        let Some(name) = name else { return };
+        match self.state.dp.drop_column(&name) {
+            Ok(()) => {
+                *self.state.dirty.borrow_mut() = true;
+                // remove o valor da coluna em cada RowObject já carregado (sem re-query)
+                let cnt = self.store.n_items();
+                for i in 0..cnt {
+                    if let Some(obj) = self.store.item(i) {
+                        obj.downcast::<RowObject>().unwrap().remove_value(col);
+                    }
+                }
+                self.state.columns.borrow_mut().remove(col);
+                let names = self.state.columns.borrow().clone();
+                self.rebuild_columns(&names);
+            }
+            Err(e) => self.error(&format!("{}\n{e}", tr("column_op_error"))),
+        }
+    }
+
+    /// Soma diretamente a coluna sob o cursor (item do menu de contexto).
+    fn ctx_sum_column(self: &Rc<Self>) {
+        let col = self.ctx_col.get();
+        let name = self.state.columns.borrow().get(col).cloned();
+        let Some(name) = name else { return };
+        match self.state.dp.sum_column(&name) {
+            Ok((total, count)) => {
+                let body = format!(
+                    "{}: {}\n({} {})",
+                    tr("total"),
+                    fmt_br(total),
+                    count,
+                    tr("numeric_values")
+                );
+                self.info(&format!("{} {name}", tr("sum")), &body);
+            }
+            Err(e) => self.error(&format!("{}\n{e}", tr("sum_failed"))),
+        }
+    }
+}
+
+/// Percorre recursivamente os widgets de cabeçalho (`GtkColumnViewTitle`) e
+/// arma o duplo-clique para edição inline do nome da coluna.
+fn arm_titles(w: &gtk::Widget, me: &Rc<DocumentView>) {
+    if w.type_().name() == "GtkColumnViewTitle" {
+        let title = w.clone();
+        let me2 = me.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gdk::BUTTON_PRIMARY);
+        gesture.connect_pressed(move |_, n_press, _, _| {
+            if n_press != 2 {
+                return;
+            }
+            let name = label_text(&title).unwrap_or_default();
+            me2.open_rename_popover(&title, &name);
+        });
+        w.add_controller(gesture);
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        arm_titles(&c, me);
+        child = c.next_sibling();
+    }
+}
+
+/// Retorna o texto do primeiro `GtkLabel` descendente (o nome exibido da coluna).
+fn label_text(w: &gtk::Widget) -> Option<String> {
+    if let Ok(lbl) = w.clone().downcast::<gtk::Label>() {
+        return Some(lbl.text().to_string());
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(t) = label_text(&c) {
+            return Some(t);
+        }
+        child = c.next_sibling();
+    }
+    None
 }
 
 /// Formata número no padrão pt-BR: 1.234.567,89

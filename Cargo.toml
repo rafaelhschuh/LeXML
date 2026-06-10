@@ -1,6 +1,6 @@
 [package]
 name = "lexml-gtk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Leitor e editor de arquivos XML em tabela, nativo GTK4/GNOME"
 license = "GPL-3.0-or-later"
