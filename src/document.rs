@@ -262,11 +262,50 @@ impl DocumentView {
 
             factory.connect_setup(move |_, list_item| {
                 let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+                list_item.set_focusable(false); // O foco vai direto para a célula
+                
                 let label = gtk::EditableLabel::new("");
                 label.set_margin_start(4);
                 label.set_margin_end(4);
                 label.set_max_width_chars(60);
                 list_item.set_child(Some(&label));
+
+                let me_key = me.clone();
+                let li_key = list_item.clone();
+
+                // Controlador de navegação por teclado
+                let key_ctrl = gtk::EventControllerKey::new();
+                key_ctrl.connect_key_pressed(move |ctrl, keyval, _code, _state| {
+                    let lbl = ctrl.widget().unwrap().downcast::<gtk::EditableLabel>().unwrap();
+                    if lbl.is_editing() {
+                        return glib::Propagation::Proceed;
+                    }
+                    let dir = match keyval {
+                        gdk::Key::Left => Some(gtk::DirectionType::Left),
+                        gdk::Key::Right => Some(gtk::DirectionType::Right),
+                        gdk::Key::Up => Some(gtk::DirectionType::Up),
+                        gdk::Key::Down => Some(gtk::DirectionType::Down),
+                        _ => None,
+                    };
+                    if let Some(d) = dir {
+                        if let Some(root) = lbl.root() {
+                            let w = root.upcast::<gtk::Widget>();
+                            w.child_focus(d);
+                            
+                            // Sincroniza o destaque da linha com o novo foco da célula
+                            let pos = li_key.position();
+                            if keyval == gdk::Key::Up && pos > 0 {
+                                me_key.selection.set_selected(pos - 1);
+                            } else if keyval == gdk::Key::Down && pos + 1 < me_key.store.n_items() {
+                                me_key.selection.set_selected(pos + 1);
+                            }
+
+                            return glib::Propagation::Stop;
+                        }
+                    }
+                    glib::Propagation::Proceed
+                });
+                label.add_controller(key_ctrl);
 
                 // menu de contexto (botão direito) sensível à linha/coluna
                 let me_ctx = me.clone();

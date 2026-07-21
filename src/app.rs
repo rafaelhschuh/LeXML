@@ -509,6 +509,39 @@ pub fn run() -> glib::ExitCode {
 
     let theme = cfg.theme.clone();
     app.connect_startup(move |_| {
+        // Carrega CSS customizado para indicar a célula em foco na grade
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(
+            "
+            /* Desliga o destaque de linha selecionada do GTK para
+               não conflitar com o destaque de célula. */
+            columnview > listview > row:selected {
+                background-color: transparent;
+            }
+            columnview > listview > row:selected cell {
+                background-color: transparent;
+            }
+            /* Destaque apenas na célula que contém o foco. */
+            columnview cell:focus-within {
+                outline: 2px solid @accent_bg_color;
+                outline-offset: -2px;
+                background-color: alpha(@accent_bg_color, 0.15);
+            }
+            /* Limpa o foco nativo do EditableLabel para não
+               duplicar com o contorno da célula. */
+            columnview cell editablelabel:focus,
+            columnview cell editablelabel text:focus {
+                outline: none;
+                box-shadow: none;
+            }
+            "
+        );
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().expect("Não foi possível conectar ao display"),
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
         // GTK4 puro: o app segue o tema (e cor de destaque) do sistema. Só
         // sobrepomos claro/escuro quando configurado. LEXML_THEME sobrepõe.
         match std::env::var("LEXML_THEME").as_deref() {
