@@ -307,8 +307,14 @@ impl XmlDoc {
     }
 
     /// Soma valores numéricos de uma coluna. Retorna (total, qtd_numéricos).
-    pub fn sum_column(&self, column: &str) -> Result<(f64, usize)> {
-        let sql = format!("SELECT \"{}\" FROM dados", column);
+    pub fn sum_column(&self, column: &str, where_clause: Option<&str>) -> Result<(f64, usize)> {
+        let mut sql = format!("SELECT \"{}\" FROM dados", column);
+        if let Some(w) = where_clause {
+            if !w.trim().is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(w);
+            }
+        }
         let mut stmt = self.db.prepare(&sql)?;
         let mut q = stmt.query([])?;
         let mut total = 0.0;

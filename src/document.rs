@@ -16,6 +16,7 @@ struct State {
     editable: RefCell<bool>,
     dirty: RefCell<bool>,
     path: PathBuf,
+    saved_path: RefCell<Option<PathBuf>>, // caminho em disco já conhecido (Salvar sobrescreve)
     last_filter: RefCell<String>, // último WHERE aplicado (para recarregar)
 }
 
@@ -39,6 +40,9 @@ impl DocumentView {
             columns: RefCell::new(Vec::new()),
             editable: RefCell::new(true),
             dirty: RefCell::new(false),
+            // Arquivos abertos do disco vêm com caminho absoluto; um documento
+            // novo ("novo.xml") vem com caminho relativo e ainda não tem destino.
+            saved_path: RefCell::new(if path.is_absolute() { Some(path.clone()) } else { None }),
             path,
             last_filter: RefCell::new(String::new()),
         });
@@ -79,13 +83,14 @@ impl DocumentView {
         sum_btn.set_tooltip_text(Some(tr("sum_tooltip")));
         bar.append(&sum_btn);
 
-        let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
-        save_btn.set_tooltip_text(Some(tr("save_tooltip")));
-        bar.append(&save_btn);
-
         let csv_btn = gtk::Button::from_icon_name("x-office-spreadsheet-symbolic");
         csv_btn.set_tooltip_text(Some(tr("csv_tooltip")));
         bar.append(&csv_btn);
+
+        // Ícone de disquete: padrão universal de "salvar".
+        let save_btn = gtk::Button::from_icon_name("media-floppy-symbolic");
+        save_btn.set_tooltip_text(Some(tr("save_tooltip")));
+        bar.append(&save_btn);
 
         root.append(&bar);
 
@@ -166,6 +171,27 @@ impl DocumentView {
         filter_btn.connect_clicked(clone!(@strong apply_filter => move |_| apply_filter()));
         filter_entry.connect_activate(clone!(@strong apply_filter => move |_| apply_filter()));
 
+        me.arm_filter_autocomplete(&filter_entry);
+
+        // Ctrl+S salva (sobrescreve o arquivo atual); Ctrl+Shift+S abre "Salvar como".
+        let save_keys = gtk::EventControllerKey::new();
+        save_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let me_keys = me.clone();
+        save_keys.connect_key_pressed(move |_, keyval, _code, state| {
+            if state.contains(gdk::ModifierType::CONTROL_MASK)
+                && matches!(keyval, gdk::Key::s | gdk::Key::S)
+            {
+                if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                    me_keys.save_as(|_ok| {});
+                } else {
+                    me_keys.do_save();
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        me.root.add_controller(save_keys);
+
         sql_btn.connect_clicked(clone!(@strong me => move |_| me.open_sql_dialog()));
         sum_btn.connect_clicked(clone!(@strong me => move |_| me.do_sum()));
         save_btn.connect_clicked(clone!(@strong me => move |_| me.do_save()));
@@ -199,6 +225,171 @@ impl DocumentView {
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("filter_error"))),
         }
+    }
+
+    /// Arma o autocompletar de nomes de coluna no campo de filtro (WHERE).
+    /// Enquanto o usuário digita, sugere colunas cujo nome começa com a
+    /// palavra atual; Tab/Enter/clique completam a palavra em foco.
+    fn arm_filter_autocomplete(self: &Rc<Self>, entry: &gtk::Entry) {
+        let listbox = gtk::ListBox::new();
+        listbox.set_selection_mode(gtk::SelectionMode::Single);
+        listbox.add_css_class("filter-suggestions");
+
+        let popover = gtk::Popover::builder()
+            .autohide(false)          // mantém o foco no campo de texto
+            .has_arrow(false)
+            .position(gtk::PositionType::Bottom)
+            .halign(gtk::Align::Start)
+            .build();
+        popover.set_child(Some(&listbox));
+        popover.set_parent(entry);
+        popover.add_css_class("filter-suggestions-popover");
+
+        // Preenche a lista com as colunas que casam com o prefixo digitado.
+        // Retorna true se há sugestões visíveis.
+        let refresh = {
+            let me = self.clone();
+            let entry = entry.clone();
+            let listbox = listbox.clone();
+            let popover = popover.clone();
+            move || -> bool {
+                while let Some(row) = listbox.row_at_index(0) {
+                    listbox.remove(&row);
+                }
+                let text = entry.text().to_string();
+                let cursor = entry.position().max(0) as usize;
+                let (start, _end, word) = current_word(&text, cursor);
+                // só sugere ao digitar o começo de uma palavra (não no meio)
+                let typed = word.chars().take(cursor.saturating_sub(start)).collect::<String>();
+                if typed.trim().is_empty() {
+                    popover.popdown();
+                    return false;
+                }
+                let needle = typed.to_lowercase();
+                let cols = me.state.columns.borrow();
+                let mut shown = 0;
+                for col in cols.iter() {
+                    if col == "_rid" || col == "__ord" {
+                        continue;
+                    }
+                    if col.to_lowercase().starts_with(&needle) && col.to_lowercase() != needle {
+                        let label = gtk::Label::builder()
+                            .label(col)
+                            .xalign(0.0)
+                            .margin_start(8)
+                            .margin_end(8)
+                            .margin_top(3)
+                            .margin_bottom(3)
+                            .build();
+                        let row = gtk::ListBoxRow::new();
+                        row.set_child(Some(&label));
+                        listbox.append(&row);
+                        shown += 1;
+                        if shown >= 8 {
+                            break;
+                        }
+                    }
+                }
+                if shown == 0 {
+                    popover.popdown();
+                    return false;
+                }
+                if let Some(first) = listbox.row_at_index(0) {
+                    listbox.select_row(Some(&first));
+                }
+                popover.popup();
+                true
+            }
+        };
+
+        // Completa a palavra atual com o texto da linha selecionada (ou a `row`
+        // informada), acrescentando um espaço, e fecha o popover.
+        let complete = {
+            let entry = entry.clone();
+            let listbox = listbox.clone();
+            let popover = popover.clone();
+            move |chosen: Option<gtk::ListBoxRow>| {
+                let row = chosen.or_else(|| listbox.selected_row());
+                let Some(row) = row else { return };
+                let name = row
+                    .child()
+                    .and_then(|c| c.downcast::<gtk::Label>().ok())
+                    .map(|l| l.text().to_string());
+                let Some(name) = name else { return };
+
+                let text = entry.text().to_string();
+                let cursor = entry.position().max(0) as usize;
+                let (start, end, _word) = current_word(&text, cursor);
+                let insert = format!("{} ", quote_ident(&name));
+                entry.delete_text(start as i32, end as i32);
+                let mut pos = start as i32;
+                entry.insert_text(&insert, &mut pos);
+                entry.set_position(pos);
+                popover.popdown();
+            }
+        };
+
+        entry.connect_changed(clone!(@strong refresh => move |_| { refresh(); }));
+
+        // Tab/Enter completam; setas navegam; Esc fecha.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let listbox_k = listbox.clone();
+        let popover_k = popover.clone();
+        keys.connect_key_pressed(move |_, keyval, _code, _state| {
+            let open = popover_k.is_visible() && listbox_k.row_at_index(0).is_some();
+            match keyval {
+                gdk::Key::Tab if open => {
+                    complete(None);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Return | gdk::Key::KP_Enter if open => {
+                    complete(None);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Escape if open => {
+                    popover_k.popdown();
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Down if open => {
+                    move_selection(&listbox_k, 1);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Up if open => {
+                    move_selection(&listbox_k, -1);
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        entry.add_controller(keys);
+
+        // clique numa sugestão também completa
+        let complete_click = {
+            let listbox = listbox.clone();
+            let entry = entry.clone();
+            let popover = popover.clone();
+            move |row: &gtk::ListBoxRow| {
+                let name = row
+                    .child()
+                    .and_then(|c| c.downcast::<gtk::Label>().ok())
+                    .map(|l| l.text().to_string());
+                let Some(name) = name else { return };
+                let text = entry.text().to_string();
+                let cursor = entry.position().max(0) as usize;
+                let (start, end, _word) = current_word(&text, cursor);
+                let insert = format!("{} ", quote_ident(&name));
+                entry.delete_text(start as i32, end as i32);
+                let mut pos = start as i32;
+                entry.insert_text(&insert, &mut pos);
+                entry.set_position(pos);
+                popover.popdown();
+                entry.grab_focus();
+                entry.set_position(pos);
+                let _ = &listbox;
+            }
+        };
+        listbox.connect_row_activated(move |_, row| complete_click(row));
     }
 
     fn run_sql(self: &Rc<Self>, sql: &str) {
@@ -278,6 +469,21 @@ impl DocumentView {
                 key_ctrl.connect_key_pressed(move |ctrl, keyval, _code, _state| {
                     let lbl = ctrl.widget().unwrap().downcast::<gtk::EditableLabel>().unwrap();
                     if lbl.is_editing() {
+                        // Tab/Shift+Tab: commita e move o foco manualmente. Sem isso,
+                        // o EditableLabel devolve o foco a si mesmo ao parar de editar,
+                        // brigando com o Tab e gerando um flick para a célula original.
+                        let tab_dir = match keyval {
+                            gdk::Key::Tab => Some(gtk::DirectionType::Right),
+                            gdk::Key::ISO_Left_Tab => Some(gtk::DirectionType::Left),
+                            _ => None,
+                        };
+                        if let Some(d) = tab_dir {
+                            lbl.stop_editing(true);
+                            if let Some(root) = lbl.root() {
+                                root.upcast::<gtk::Widget>().child_focus(d);
+                            }
+                            return glib::Propagation::Stop;
+                        }
                         return glib::Propagation::Proceed;
                     }
                     let dir = match keyval {
@@ -301,6 +507,23 @@ impl DocumentView {
                             }
 
                             return glib::Propagation::Stop;
+                        }
+                    }
+
+                    // Digitou um caractere imprimível numa célula focada (sem editar):
+                    // inicia a edição já substituindo o conteúdo pelo que foi digitado,
+                    // sem exigir Enter. Ignora se houver Ctrl/Alt (atalhos).
+                    if lbl.is_editable()
+                        && !_state.intersects(gdk::ModifierType::CONTROL_MASK
+                            | gdk::ModifierType::ALT_MASK)
+                    {
+                        if let Some(ch) = keyval.to_unicode() {
+                            if !ch.is_control() {
+                                lbl.start_editing();
+                                lbl.set_text(&ch.to_string());
+                                lbl.set_position(-1);
+                                return glib::Propagation::Stop;
+                            }
                         }
                     }
                     glib::Propagation::Proceed
@@ -469,7 +692,8 @@ impl DocumentView {
             move || {
                 let sel = dropdown2.selected();
                 let Some(col) = names.get(sel as usize).cloned() else { return };
-                match me.state.dp.sum_column(&col) {
+                let filter = me.state.last_filter.borrow().clone();
+                match me.state.dp.sum_column(&col, Some(&filter)) {
                     Ok((total, count)) => {
                         let body = format!(
                             "{}: {}\n({} {})",
@@ -512,15 +736,57 @@ impl DocumentView {
         *self.state.dirty.borrow()
     }
 
-    /// Abre o seletor de salvamento. `after` é chamado quando o diálogo fecha,
-    /// com `true` se o arquivo foi gravado com sucesso (e `false` se o usuário
-    /// cancelou ou houve erro) — usado para encadear o fechamento da janela.
+    /// Grava diretamente em `path`, atualizando estado (destino conhecido e
+    /// flag de "sujo"). Retorna `true` em sucesso.
+    fn write_to(self: &Rc<Self>, path: &std::path::Path) -> bool {
+        match self.state.dp.save(path) {
+            Ok(()) => {
+                *self.state.dirty.borrow_mut() = false;
+                *self.state.saved_path.borrow_mut() = Some(path.to_path_buf());
+                let when = glib::DateTime::now_local()
+                    .and_then(|d| d.format("%d/%m/%Y %H:%M:%S"))
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                self.status.set_text(&format!(
+                    "{}: {}  ·  {}",
+                    tr("save_tooltip"),
+                    path.display(),
+                    when
+                ));
+                true
+            }
+            Err(e) => {
+                self.error(&format!("{}\n{e}", tr("save_error")));
+                false
+            }
+        }
+    }
+
+    /// Salva. Se o documento já tem um destino em disco, sobrescreve direto
+    /// (sem abrir o seletor); caso contrário, abre "Salvar como". `after` é
+    /// chamado quando termina, com `true` se gravou.
     pub fn save_then(self: &Rc<Self>, after: impl FnOnce(bool) + 'static) {
+        self.commit_pending_edit();
+        let known = self.state.saved_path.borrow().clone();
+        if let Some(path) = known {
+            let ok = self.write_to(&path);
+            after(ok);
+        } else {
+            self.save_as(after);
+        }
+    }
+
+    /// Abre sempre o seletor de salvamento (Salvar como…).
+    pub fn save_as(self: &Rc<Self>, after: impl FnOnce(bool) + 'static) {
+        self.commit_pending_edit();
         let dialog = gtk::FileDialog::builder()
             .title(tr("save_as_xml"))
             .initial_name(
                 self.state
-                    .path
+                    .saved_path
+                    .borrow()
+                    .as_ref()
+                    .unwrap_or(&self.state.path)
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "saida.xml".into()),
@@ -531,14 +797,7 @@ impl DocumentView {
             let mut ok = false;
             if let Ok(file) = res {
                 if let Some(path) = file.path() {
-                    match me.state.dp.save(&path) {
-                        Ok(()) => {
-                            *me.state.dirty.borrow_mut() = false;
-                            me.status.set_text(&format!("{}: {}", tr("save_tooltip"), path.display()));
-                            ok = true;
-                        }
-                        Err(e) => me.error(&format!("{}\n{e}", tr("save_error"))),
-                    }
+                    ok = me.write_to(&path);
                 }
             }
             after(ok);
@@ -581,6 +840,24 @@ impl DocumentView {
 
     fn window(&self) -> Option<gtk::Window> {
         self.root.root().and_then(|r| r.downcast::<gtk::Window>().ok())
+    }
+
+    /// Confirma a edição de célula em andamento (se houver) antes de salvar.
+    /// Sem isso, Ctrl+S/botão salvam com o valor antigo, pois o commit só
+    /// ocorre quando o EditableLabel perde o foco.
+    fn commit_pending_edit(&self) {
+        let Some(win) = self.window() else { return };
+        let Some(focus) = GtkWindowExt::focus(&win) else { return };
+        let mut w = Some(focus);
+        while let Some(cur) = w {
+            if let Ok(lbl) = cur.clone().downcast::<gtk::EditableLabel>() {
+                if lbl.is_editing() {
+                    lbl.stop_editing(true); // dispara o commit (notify "editing")
+                }
+                break;
+            }
+            w = cur.parent();
+        }
     }
 
     fn info(&self, heading: &str, body: &str) {
@@ -730,7 +1007,8 @@ impl DocumentView {
         let col = self.ctx_col.get();
         let name = self.state.columns.borrow().get(col).cloned();
         let Some(name) = name else { return };
-        match self.state.dp.sum_column(&name) {
+        let filter = self.state.last_filter.borrow().clone();
+        match self.state.dp.sum_column(&name, Some(&filter)) {
             Ok((total, count)) => {
                 let body = format!(
                     "{}: {}\n({} {})",
@@ -800,4 +1078,60 @@ fn fmt_br(n: f64) -> String {
         grouped.push(*b as char);
     }
     format!("{}{},{}", if neg { "-" } else { "" }, grouped, dec_part)
+}
+
+/// Um caractere faz parte de um identificador de coluna (letras, dígitos, `_`).
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Dado o texto e a posição do cursor (em caracteres), devolve
+/// (início, fim, palavra) da palavra que contém/termina no cursor.
+/// Os índices são em caracteres.
+fn current_word(text: &str, cursor: usize) -> (usize, usize, String) {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let mut start = cursor;
+    while start > 0 && is_ident_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < chars.len() && is_ident_char(chars[end]) {
+        end += 1;
+    }
+    let word: String = chars[start..end].iter().collect();
+    (start, end, word)
+}
+
+/// Coloca aspas duplas no nome da coluna se ele não for um identificador
+/// SQL simples (ou contiver caracteres fora de `[A-Za-z0-9_]` / iniciar com dígito).
+fn quote_ident(name: &str) -> String {
+    let simple = !name.is_empty()
+        && name.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if simple {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+/// Move a seleção da lista de sugestões em `delta` linhas, com clamp.
+fn move_selection(listbox: &gtk::ListBox, delta: i32) {
+    let cur = listbox.selected_row().map(|r| r.index()).unwrap_or(0);
+    let mut idx = cur + delta;
+    if idx < 0 {
+        idx = 0;
+    }
+    // encontra o maior índice válido
+    let mut last = 0;
+    while listbox.row_at_index(last + 1).is_some() {
+        last += 1;
+    }
+    if idx > last {
+        idx = last;
+    }
+    if let Some(row) = listbox.row_at_index(idx) {
+        listbox.select_row(Some(&row));
+    }
 }

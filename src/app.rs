@@ -534,6 +534,24 @@ pub fn run() -> glib::ExitCode {
                 outline: none;
                 box-shadow: none;
             }
+            /* Autocompletar de colunas no campo de filtro. */
+            popover.filter-suggestions-popover > contents {
+                padding: 4px;
+            }
+            listbox.filter-suggestions {
+                background: transparent;
+            }
+            listbox.filter-suggestions row {
+                border-radius: 6px;
+                padding: 0;
+            }
+            listbox.filter-suggestions row:selected {
+                background-color: alpha(@accent_bg_color, 0.18);
+                color: @accent_color;
+            }
+            listbox.filter-suggestions row:hover {
+                background-color: alpha(@accent_bg_color, 0.10);
+            }
             "
         );
         gtk::style_context_add_provider_for_display(
