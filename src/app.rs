@@ -577,15 +577,15 @@ pub fn run() -> glib::ExitCode {
         let provider = gtk::CssProvider::new();
         provider.load_from_string(
             "
-            /* Desliga o destaque de linha selecionada do GTK para
-               não conflitar com o destaque de célula. */
+            /* Destaque da linha selecionada (1º clique / botão direito /
+               navegação por teclado): tinge a linha inteira. */
             columnview > listview > row:selected {
-                background-color: transparent;
+                background-color: alpha(@accent_bg_color, 0.12);
             }
             columnview > listview > row:selected cell {
                 background-color: transparent;
             }
-            /* Destaque apenas na célula que contém o foco. */
+            /* Destaque mais forte na célula que contém o foco. */
             columnview cell:focus-within {
                 outline: 2px solid @accent_bg_color;
                 outline-offset: -2px;

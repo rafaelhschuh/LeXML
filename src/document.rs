@@ -126,17 +126,41 @@ impl DocumentView {
 
         // ---------- menu de contexto (botão direito) ----------
         let menu_model = gio::Menu::new();
-        let sec_rows = gio::Menu::new();
-        sec_rows.append(Some(tr("ctx_row_above")), Some("doc.row-above"));
-        sec_rows.append(Some(tr("ctx_row_below")), Some("doc.row-below"));
-        sec_rows.append(Some(tr("ctx_row_delete")), Some("doc.row-delete"));
-        menu_model.append_section(None, &sec_rows);
-        let sec_cols = gio::Menu::new();
-        sec_cols.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
-        sec_cols.append(Some(tr("ctx_col_add")), Some("doc.col-add"));
-        sec_cols.append(Some(tr("ctx_col_delete")), Some("doc.col-delete"));
-        menu_model.append_section(None, &sec_cols);
-        let menu = gtk::PopoverMenu::from_model(Some(&menu_model));
+
+        // Submenu "Linha": inserir / clonar / mover / excluir
+        let rows_menu = gio::Menu::new();
+        let sec_insert = gio::Menu::new();
+        sec_insert.append(Some(tr("ctx_row_above")), Some("doc.row-above"));
+        sec_insert.append(Some(tr("ctx_row_below")), Some("doc.row-below"));
+        rows_menu.append_section(None, &sec_insert);
+        let sec_clone = gio::Menu::new();
+        sec_clone.append(Some(tr("ctx_row_clone_above")), Some("doc.row-clone-above"));
+        sec_clone.append(Some(tr("ctx_row_clone_below")), Some("doc.row-clone-below"));
+        rows_menu.append_section(None, &sec_clone);
+        let sec_move = gio::Menu::new();
+        sec_move.append(Some(tr("ctx_row_move_up")), Some("doc.row-move-up"));
+        sec_move.append(Some(tr("ctx_row_move_down")), Some("doc.row-move-down"));
+        rows_menu.append_section(None, &sec_move);
+        let sec_row_del = gio::Menu::new();
+        sec_row_del.append(Some(tr("ctx_row_delete")), Some("doc.row-delete"));
+        rows_menu.append_section(None, &sec_row_del);
+        menu_model.append_submenu(Some(tr("ctx_row_menu")), &rows_menu);
+
+        // Submenu "Coluna": somar / adicionar / excluir
+        let cols_menu = gio::Menu::new();
+        cols_menu.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
+        cols_menu.append(Some(tr("ctx_col_add")), Some("doc.col-add"));
+        cols_menu.append(Some(tr("ctx_col_delete")), Some("doc.col-delete"));
+        menu_model.append_submenu(Some(tr("ctx_col_menu")), &cols_menu);
+
+        // Atalho em destaque, fora dos submenus: Somar coluna.
+        let sec_quick = gio::Menu::new();
+        sec_quick.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
+        menu_model.append_section(None, &sec_quick);
+
+        // NESTED: cada submenu abre em seu próprio popover, dimensionado ao
+        // conteúdo (evita o scroll do modo deslizante, que não recalcula altura).
+        let menu = gtk::PopoverMenu::from_model_full(&menu_model, gtk::PopoverMenuFlags::NESTED);
         menu.set_parent(&colview);
         menu.set_has_arrow(false);
         menu.set_halign(gtk::Align::Start);
@@ -164,6 +188,10 @@ impl DocumentView {
         actions.add_action(&mk("row-above", Box::new(clone!(@strong me => move || me.ctx_insert_row(true)))));
         actions.add_action(&mk("row-below", Box::new(clone!(@strong me => move || me.ctx_insert_row(false)))));
         actions.add_action(&mk("row-delete", Box::new(clone!(@strong me => move || me.ctx_delete_row()))));
+        actions.add_action(&mk("row-clone-above", Box::new(clone!(@strong me => move || me.ctx_clone_row(true)))));
+        actions.add_action(&mk("row-clone-below", Box::new(clone!(@strong me => move || me.ctx_clone_row(false)))));
+        actions.add_action(&mk("row-move-up", Box::new(clone!(@strong me => move || me.ctx_move_row(true)))));
+        actions.add_action(&mk("row-move-down", Box::new(clone!(@strong me => move || me.ctx_move_row(false)))));
         actions.add_action(&mk("col-sum", Box::new(clone!(@strong me => move || me.ctx_sum_column()))));
         actions.add_action(&mk("col-add", Box::new(clone!(@strong me => move || me.ctx_add_column()))));
         actions.add_action(&mk("col-delete", Box::new(clone!(@strong me => move || me.ctx_delete_column()))));
@@ -574,6 +602,11 @@ impl DocumentView {
                             me_ctx.ctx_rowid.set(row.rowid());
                         }
                     }
+                    // seleciona a linha clicada para deixar claro o alvo da ação
+                    let pos = li_ctx.position();
+                    if pos != gtk::INVALID_LIST_POSITION {
+                        me_ctx.selection.set_selected(pos);
+                    }
                     me_ctx.ctx_col.set(col_idx);
                     if let Some(w) = g.widget() {
                         if let Some(p) = w.compute_point(
@@ -587,6 +620,33 @@ impl DocumentView {
                     me_ctx.menu.popup();
                 });
                 label.add_controller(gesture);
+
+                // Clique esquerdo em duas etapas: o 1º clique apenas seleciona a
+                // linha (destaque visual) e foca a célula, sem editar; o 2º clique
+                // (linha já selecionada) deixa o EditableLabel entrar em edição.
+                let me_sel = me.clone();
+                let li_sel = list_item.clone();
+                let sel_gesture = gtk::GestureClick::new();
+                sel_gesture.set_button(gdk::BUTTON_PRIMARY);
+                sel_gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+                sel_gesture.connect_pressed(move |g, _n, _x, _y| {
+                    let lbl = g.widget().unwrap().downcast::<gtk::EditableLabel>().unwrap();
+                    if lbl.is_editing() {
+                        return; // já editando: não interfere
+                    }
+                    let pos = li_sel.position();
+                    if pos == gtk::INVALID_LIST_POSITION {
+                        return;
+                    }
+                    if me_sel.selection.selected() != pos {
+                        // 1º clique: seleciona e foca a célula, mas bloqueia a edição
+                        me_sel.selection.set_selected(pos);
+                        lbl.grab_focus();
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                    }
+                    // linha já selecionada: não reivindica → EditableLabel edita
+                });
+                label.add_controller(sel_gesture);
 
                 // commit ao terminar edição
                 let me2 = me.clone();
@@ -972,6 +1032,58 @@ impl DocumentView {
                 }
                 self.refresh_status();
             }
+            Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
+        }
+    }
+
+    fn ctx_clone_row(self: &Rc<Self>, above: bool) {
+        if !*self.state.editable.borrow() {
+            return;
+        }
+        let rid = self.ctx_rowid.get();
+        if rid < 0 {
+            return;
+        }
+        match self.state.dp.clone_row(rid, above) {
+            Ok((new_rid, values)) => {
+                *self.state.dirty.borrow_mut() = true;
+                let obj = RowObject::new(new_rid, values, true);
+                let pos = self.row_position(rid).unwrap_or(self.store.n_items());
+                let at = if above { pos } else { pos + 1 };
+                self.store.insert(at, &obj);
+                self.refresh_status();
+                self.selection.set_selected(at);
+                self.colview.scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
+            }
+            Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
+        }
+    }
+
+    fn ctx_move_row(self: &Rc<Self>, up: bool) {
+        if !*self.state.editable.borrow() {
+            return;
+        }
+        let rid = self.ctx_rowid.get();
+        if rid < 0 {
+            return;
+        }
+        match self.state.dp.move_row(rid, up) {
+            Ok(Some(_)) => {
+                *self.state.dirty.borrow_mut() = true;
+                let Some(pos) = self.row_position(rid) else {
+                    return;
+                };
+                // reordena o store para refletir a troca (sem re-consultar)
+                let target = if up { pos.wrapping_sub(1) } else { pos + 1 };
+                if let Some(obj) = self.store.item(pos) {
+                    self.store.remove(pos);
+                    self.store.insert(target, &obj);
+                    self.selection.set_selected(target);
+                    self.colview
+                        .scroll_to(target, None, gtk::ListScrollFlags::FOCUS, None);
+                }
+            }
+            Ok(None) => {} // já está no topo/fundo
             Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
         }
     }

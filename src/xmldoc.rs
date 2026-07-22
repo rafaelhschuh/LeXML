@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::cell::RefCell;
 use std::io::Write;
 use std::path::Path;
@@ -254,18 +254,7 @@ impl XmlDoc {
         let ref_ord: f64 =
             self.db
                 .query_row("SELECT __ord FROM dados WHERE rowid = ?1", [ref_rowid], |r| r.get(0))?;
-        let neighbor_sql = if above {
-            "SELECT MAX(__ord) FROM dados WHERE __ord < ?1"
-        } else {
-            "SELECT MIN(__ord) FROM dados WHERE __ord > ?1"
-        };
-        let neighbor: Option<f64> =
-            self.db.query_row(neighbor_sql, [ref_ord], |r| r.get(0))?;
-        let new_ord = match neighbor {
-            Some(n) => (n + ref_ord) / 2.0,
-            None if above => ref_ord - 1.0,
-            None => ref_ord + 1.0,
-        };
+        let new_ord = self.ord_between(ref_ord, above)?;
         self.insert_blank(new_ord)
     }
 
@@ -274,6 +263,98 @@ impl XmlDoc {
         self.db
             .execute("DELETE FROM dados WHERE rowid = ?1", [rowid])?;
         Ok(())
+    }
+
+    /// Calcula um `__ord` para inserir imediatamente acima (ou abaixo) da linha
+    /// `ref_ord`, respeitando a vizinha existente.
+    fn ord_between(&self, ref_ord: f64, above: bool) -> Result<f64> {
+        let neighbor_sql = if above {
+            "SELECT MAX(__ord) FROM dados WHERE __ord < ?1"
+        } else {
+            "SELECT MIN(__ord) FROM dados WHERE __ord > ?1"
+        };
+        let neighbor: Option<f64> = self.db.query_row(neighbor_sql, [ref_ord], |r| r.get(0))?;
+        Ok(match neighbor {
+            Some(n) => (n + ref_ord) / 2.0,
+            None if above => ref_ord - 1.0,
+            None => ref_ord + 1.0,
+        })
+    }
+
+    /// Clona a linha `ref_rowid`, inserindo a cópia imediatamente acima (ou
+    /// abaixo). Retorna o rowid da nova linha e os valores copiados, na ordem
+    /// de `field_names()`.
+    pub fn clone_row(&self, ref_rowid: i64, above: bool) -> Result<(i64, Vec<String>)> {
+        let ref_ord: f64 = self
+            .db
+            .query_row("SELECT __ord FROM dados WHERE rowid = ?1", [ref_rowid], |r| r.get(0))?;
+        let new_ord = self.ord_between(ref_ord, above)?;
+
+        let names = self.field_names();
+        if names.is_empty() {
+            bail!("documento sem colunas");
+        }
+        // lê os valores da linha de origem
+        let sel = names.iter().map(|n| quote_ident(n)).collect::<Vec<_>>().join(", ");
+        let vals: Vec<String> = {
+            let mut stmt = self
+                .db
+                .prepare(&format!("SELECT {sel} FROM dados WHERE rowid = ?1"))?;
+            stmt.query_row([ref_rowid], |r| {
+                let mut v = Vec::with_capacity(names.len());
+                for i in 0..names.len() {
+                    let val: rusqlite::types::Value = r.get(i)?;
+                    v.push(value_to_string(&val));
+                }
+                Ok(v)
+            })?
+        };
+
+        // insere a cópia com os mesmos valores
+        let mut cols: Vec<String> = names.iter().map(|n| quote_ident(n)).collect();
+        cols.push("\"__ord\"".to_string());
+        let mut placeholders: Vec<String> = (1..=names.len()).map(|i| format!("?{i}")).collect();
+        placeholders.push(new_ord.to_string());
+        self.db.execute(
+            &format!(
+                "INSERT INTO dados ({}) VALUES ({})",
+                cols.join(", "),
+                placeholders.join(", ")
+            ),
+            rusqlite::params_from_iter(vals.iter()),
+        )?;
+        Ok((self.db.last_insert_rowid(), vals))
+    }
+
+    /// Move a linha `rowid` uma posição para cima (ou para baixo), trocando a
+    /// ordem com a vizinha. Retorna o rowid da linha vizinha que trocou de
+    /// lugar, ou `None` se `rowid` já estava no topo/fundo.
+    pub fn move_row(&self, rowid: i64, up: bool) -> Result<Option<i64>> {
+        let ord: f64 = self
+            .db
+            .query_row("SELECT __ord FROM dados WHERE rowid = ?1", [rowid], |r| r.get(0))?;
+        let neighbor_sql = if up {
+            "SELECT rowid, __ord FROM dados WHERE __ord < ?1 ORDER BY __ord DESC LIMIT 1"
+        } else {
+            "SELECT rowid, __ord FROM dados WHERE __ord > ?1 ORDER BY __ord ASC LIMIT 1"
+        };
+        let neighbor: Option<(i64, f64)> = self
+            .db
+            .query_row(neighbor_sql, [ord], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((nb_rowid, nb_ord)) = neighbor else {
+            return Ok(None);
+        };
+        // troca os __ord das duas linhas
+        self.db.execute(
+            "UPDATE dados SET __ord = ?1 WHERE rowid = ?2",
+            rusqlite::params![nb_ord, rowid],
+        )?;
+        self.db.execute(
+            "UPDATE dados SET __ord = ?1 WHERE rowid = ?2",
+            rusqlite::params![ord, nb_rowid],
+        )?;
+        Ok(Some(nb_rowid))
     }
 
     pub fn row_count(&self) -> i64 {
@@ -670,5 +751,63 @@ mod tests {
         // operações que montam SQL com o nome não devem falhar
         dp.add_row().unwrap();
         assert_eq!(dp.row_count(), 2);
+    }
+
+    /// Coleta a coluna `col` em ordem de exibição (__ord).
+    fn column_in_order(dp: &XmlDoc, col: &str) -> Vec<String> {
+        let res = dp.filter(None).unwrap();
+        let idx = res.columns.iter().position(|c| c == col).unwrap();
+        res.rows.iter().map(|r| r[idx].clone()).collect()
+    }
+
+    /// Descobre o _rid da linha em posição de exibição `pos`.
+    fn rid_at(dp: &XmlDoc, pos: usize) -> i64 {
+        let res = dp.filter(None).unwrap();
+        let idx = res.columns.iter().position(|c| c == "_rid").unwrap();
+        res.rows[pos][idx].parse().unwrap()
+    }
+
+    #[test]
+    fn clonar_linha_copia_valores_e_posiciona() {
+        let dp = XmlDoc::open(&sample_xml()).unwrap();
+        // clona a 2ª linha (Beta) para baixo
+        let beta_rid = rid_at(&dp, 1);
+        let (_new, vals) = dp.clone_row(beta_rid, false).unwrap();
+        assert_eq!(vals, vec!["2", "Beta", "4.25"]);
+        assert_eq!(dp.row_count(), 4);
+        // a cópia deve aparecer logo após Beta
+        assert_eq!(
+            column_in_order(&dp, "nome"),
+            vec!["Alpha", "Beta", "Beta", "Gama"]
+        );
+
+        // clona a 1ª linha (Alpha) para cima
+        let alpha_rid = rid_at(&dp, 0);
+        dp.clone_row(alpha_rid, true).unwrap();
+        assert_eq!(
+            column_in_order(&dp, "nome"),
+            vec!["Alpha", "Alpha", "Beta", "Beta", "Gama"]
+        );
+    }
+
+    #[test]
+    fn mover_linha_troca_ordem() {
+        let dp = XmlDoc::open(&sample_xml()).unwrap();
+        // move a 2ª linha (Beta) para cima → troca com Alpha
+        let beta_rid = rid_at(&dp, 1);
+        let nb = dp.move_row(beta_rid, true).unwrap();
+        assert!(nb.is_some());
+        assert_eq!(column_in_order(&dp, "nome"), vec!["Beta", "Alpha", "Gama"]);
+
+        // topo não move mais
+        assert_eq!(dp.move_row(beta_rid, true).unwrap(), None);
+
+        // move Beta (agora no topo) para baixo → troca com Alpha de volta
+        dp.move_row(beta_rid, false).unwrap();
+        assert_eq!(column_in_order(&dp, "nome"), vec!["Alpha", "Beta", "Gama"]);
+
+        // fundo não move mais
+        let gama_rid = rid_at(&dp, 2);
+        assert_eq!(dp.move_row(gama_rid, false).unwrap(), None);
     }
 }
