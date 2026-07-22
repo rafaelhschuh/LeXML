@@ -67,6 +67,32 @@ for pat in "${REMOVE[@]}"; do
   rm -fv "$APPDIR"/usr/lib/$pat
 done
 
+# Ícones: o app usa ícones simbólicos (SVG) do tema Adwaita (media-floppy-symbolic,
+# x-office-spreadsheet-symbolic, etc.). Duas coisas quebram no AppImage:
+#  a) O loaders.cache do gdk-pixbuf lista os loaders por nome RELATIVO
+#     ("libpixbufloader-svg.so") e aponta LoaderDir para o caminho do HOST de
+#     compilação. Sem GDK_PIXBUF_MODULEDIR, a GTK procura o loader SVG no host,
+#     não acha, e TODO ícone simbólico cai no glifo de "imagem quebrada".
+#     O hook exporta GDK_PIXBUF_MODULE_FILE mas NÃO o MODULEDIR — corrigimos abaixo.
+#  b) Máquinas sem o tema Adwaita instalado não teriam os SVGs. Empacotamos o
+#     tema (só símbolos + escaláveis) para o app ser autossuficiente.
+# Copiamos o gdk-pixbuf-query-loaders para regenerar o cache em tempo de execução
+# (ver hook). O cache empacotado tem caminhos relativos + LoaderDir do host, que a
+# GTK não resolve dentro do AppImage montado.
+QL="$(find /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib -name 'gdk-pixbuf-query-loaders' 2>/dev/null | grep -m1 -iE 'x86_64|lib64|/usr/lib/gdk' || find /usr/lib -name 'gdk-pixbuf-query-loaders' 2>/dev/null | head -1)"
+if [ -n "$QL" ]; then
+  cp -f "$QL" "$APPDIR/usr/lib/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders"
+  chmod +x "$APPDIR/usr/lib/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders"
+fi
+
+echo ">> Empacotando tema de ícones Adwaita (símbolos)…"
+for base in /usr/share/icons/Adwaita /usr/share/icons/hicolor; do
+  name="$(basename "$base")"
+  [ -d "$base" ] || continue
+  mkdir -p "$APPDIR/usr/share/icons/$name"
+  cp -a "$base/." "$APPDIR/usr/share/icons/$name/" 2>/dev/null || true
+done
+
 # Tema: o app é GTK4 puro e deve SEGUIR o tema da DE ONDE FOR EXECUTADO (não a
 # de onde foi compilado). O plugin gtk, porém, força "GTK_THEME=Adwaita:variant"
 # ("Custom themes are broken") — isso ignora o tema do desktop. Sobrescrevemos
@@ -75,6 +101,21 @@ done
 HOOK="$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
 if [ -f "$HOOK" ] && ! grep -q 'Lê-XML: tema da DE atual' "$HOOK"; then
 cat >> "$HOOK" <<'EOF'
+
+# ===== Lê-XML: loader SVG do gdk-pixbuf (senão ícones simbólicos quebram) =====
+# O loaders.cache empacotado tem caminhos relativos + LoaderDir do host de
+# compilação; dentro do AppImage montado (/tmp/.mount_*) a GTK não acha o loader
+# SVG e TODO ícone simbólico vira "imagem quebrada". Regeneramos o cache aqui, em
+# tempo de execução, com os caminhos ABSOLUTOS do ponto de montagem atual.
+_lx_qloaders="$APPDIR/usr/lib/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders"
+_lx_moddir="$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+if [ -x "$_lx_qloaders" ] && [ -d "$_lx_moddir" ]; then
+  _lx_cache="$(mktemp -t lexml-loaders.XXXXXX.cache)"
+  if GDK_PIXBUF_MODULEDIR="$_lx_moddir" "$_lx_qloaders" > "$_lx_cache" 2>/dev/null; then
+    export GDK_PIXBUF_MODULE_FILE="$_lx_cache"
+  fi
+fi
+export GDK_PIXBUF_MODULEDIR="$_lx_moddir"
 
 # ===== Lê-XML: tema da DE atual (executado, não compilado) =====
 # Reaproveita $GTK_THEME_VARIANT (claro/escuro) já calculado pelo plugin acima a
