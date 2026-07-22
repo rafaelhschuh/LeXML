@@ -608,6 +608,7 @@ pub fn run() -> glib::ExitCode {
             listbox.filter-suggestions row {
                 border-radius: 6px;
                 padding: 0;
+                margin: 1px 0;
             }
             listbox.filter-suggestions row:selected {
                 background-color: alpha(@accent_bg_color, 0.18);
@@ -615,6 +616,16 @@ pub fn run() -> glib::ExitCode {
             }
             listbox.filter-suggestions row:hover {
                 background-color: alpha(@accent_bg_color, 0.10);
+            }
+            /* Remove o contorno de foco quadrado desenhado ao navegar
+               por teclado; o fundo arredondado do :selected já indica
+               a linha ativa. */
+            listbox.filter-suggestions row:focus,
+            listbox.filter-suggestions row:focus-visible,
+            listbox.filter-suggestions row:focus-within {
+                outline: none;
+                box-shadow: none;
+                border-radius: 6px;
             }
             "
         );

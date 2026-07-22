@@ -105,7 +105,12 @@ impl DocumentView {
             .build();
         colview.add_css_class("data-table");
 
-        let scroller = gtk::ScrolledWindow::builder().vexpand(true).build();
+        let scroller = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            // Barras ocupam espaço próprio (não flutuam sobre o conteúdo),
+            // evitando que a barra horizontal cubra a última linha.
+            .overlay_scrolling(false)
+            .build();
         scroller.set_child(Some(&colview));
         root.append(&scroller);
 
