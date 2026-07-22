@@ -484,6 +484,30 @@ impl DocumentView {
                             }
                             return glib::Propagation::Stop;
                         }
+                        // Up/Down enquanto edita: commita e navega verticalmente.
+                        // Mesmo problema do Tab — sem tratar manualmente, o
+                        // EditableLabel devolve o foco a si mesmo e gera o flick
+                        // de volta para a célula que estava sendo editada.
+                        let nav_dir = match keyval {
+                            gdk::Key::Up => Some(gtk::DirectionType::Up),
+                            gdk::Key::Down => Some(gtk::DirectionType::Down),
+                            _ => None,
+                        };
+                        if let Some(d) = nav_dir {
+                            lbl.stop_editing(true);
+                            if let Some(root) = lbl.root() {
+                                root.upcast::<gtk::Widget>().child_focus(d);
+                            }
+                            let pos = li_key.position();
+                            if keyval == gdk::Key::Up && pos > 0 {
+                                me_key.selection.set_selected(pos - 1);
+                            } else if keyval == gdk::Key::Down
+                                && pos + 1 < me_key.store.n_items()
+                            {
+                                me_key.selection.set_selected(pos + 1);
+                            }
+                            return glib::Propagation::Stop;
+                        }
                         return glib::Propagation::Proceed;
                     }
                     let dir = match keyval {
