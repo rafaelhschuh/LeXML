@@ -1,10 +1,10 @@
 use crate::dialog;
 use crate::i18n::tr;
 use gtk::prelude::*;
-use gtk::glib::clone;
-use gtk::gio;
+use gtk::glib::{self, clone};
+use gtk::{gdk, gio};
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// Editor de texto simples (estilo bloco de notas) para XML que NÃO segue a
@@ -32,7 +32,7 @@ impl TextDocView {
             .build();
 
         let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
-        save_btn.set_tooltip_text(Some(tr("save_as")));
+        save_btn.set_tooltip_text(Some(tr("save_tooltip_text")));
         bar.append(&save_btn);
         root.append(&bar);
 
@@ -76,6 +76,25 @@ impl TextDocView {
 
         save_btn.connect_clicked(clone!(@strong me => move |_| me.do_save()));
 
+        // Ctrl+S salva no arquivo atual; Ctrl+Shift+S abre "Salvar como".
+        let save_keys = gtk::EventControllerKey::new();
+        save_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let me_keys = me.clone();
+        save_keys.connect_key_pressed(move |_, keyval, _code, state| {
+            if state.contains(gdk::ModifierType::CONTROL_MASK)
+                && matches!(keyval, gdk::Key::s | gdk::Key::S)
+            {
+                if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                    me_keys.save_as(|_ok| {});
+                } else {
+                    me_keys.do_save();
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        me.root.add_controller(save_keys);
+
         me
     }
 
@@ -87,7 +106,44 @@ impl TextDocView {
         self.save_then(|_| {});
     }
 
+    /// Grava direto no `path` informado, atualizando o estado. Retorna `true` em sucesso.
+    fn write_to(self: &Rc<Self>, path: &Path) -> bool {
+        let text = self
+            .buffer
+            .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false)
+            .to_string();
+        match std::fs::write(path, text) {
+            Ok(()) => {
+                *self.dirty.borrow_mut() = false;
+                *self.path.borrow_mut() = path.to_path_buf();
+                self.status
+                    .set_text(&format!("{}: {}", tr("save_tooltip_text"), path.display()));
+                true
+            }
+            Err(e) => {
+                self.error(&format!("{}\n{e}", tr("save_error")));
+                false
+            }
+        }
+    }
+
+    /// Salva. Se já há um destino em disco (caminho absoluto), sobrescreve direto;
+    /// caso contrário, abre "Salvar como".
     pub fn save_then(self: &Rc<Self>, after: impl FnOnce(bool) + 'static) {
+        let known = {
+            let p = self.path.borrow();
+            if p.is_absolute() { Some(p.clone()) } else { None }
+        };
+        if let Some(path) = known {
+            let ok = self.write_to(&path);
+            after(ok);
+        } else {
+            self.save_as(after);
+        }
+    }
+
+    /// Abre sempre o seletor de salvamento (Salvar como…).
+    pub fn save_as(self: &Rc<Self>, after: impl FnOnce(bool) + 'static) {
         let initial = self
             .path
             .borrow()
@@ -103,19 +159,7 @@ impl TextDocView {
             let mut ok = false;
             if let Ok(file) = res {
                 if let Some(path) = file.path() {
-                    let text = me
-                        .buffer
-                        .text(&me.buffer.start_iter(), &me.buffer.end_iter(), false)
-                        .to_string();
-                    match std::fs::write(&path, text) {
-                        Ok(()) => {
-                            *me.dirty.borrow_mut() = false;
-                            *me.path.borrow_mut() = path.clone();
-                            me.status.set_text(&format!("{}: {}", tr("save_as"), path.display()));
-                            ok = true;
-                        }
-                        Err(e) => me.error(&format!("{}\n{e}", tr("save_error"))),
-                    }
+                    ok = me.write_to(&path);
                 }
             }
             after(ok);

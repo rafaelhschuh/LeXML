@@ -1060,6 +1060,11 @@ fn arm_titles(w: &gtk::Widget, me: &Rc<DocumentView>) {
             if n_press != 2 {
                 return;
             }
+            // Não permite renomear numa visão somente-leitura (resultado de SQL
+            // livre): as colunas exibidas podem não corresponder às da tabela.
+            if !*me2.state.editable.borrow() {
+                return;
+            }
             let name = label_text(&title).unwrap_or_default();
             me2.open_rename_popover(&title, &name);
         });

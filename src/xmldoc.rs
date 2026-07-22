@@ -14,6 +14,12 @@ pub struct Field {
 
 pub struct XmlDoc {
     pub fields: RefCell<Vec<Field>>,
+    /// Tag de abertura `<DATAPACKET ...>` do arquivo original, preservada para
+    /// reescrita fiel (Version e demais atributos).
+    datapacket_open: String,
+    /// Seção `<PARAMS.../>` (ou `<PARAMS>...</PARAMS>`) do original, preservada
+    /// literalmente — o app não interpreta seu conteúdo, apenas o repassa.
+    params_xml: String,
     db: Connection,
 }
 
@@ -37,6 +43,13 @@ pub struct QueryResult {
 
 impl XmlDoc {
     pub fn open(path: &Path) -> Result<Self> {
+        // Lê o texto cru uma vez para preservar a moldura do documento
+        // (tag <DATAPACKET> e seção <PARAMS>) sem depender do modelo de eventos.
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let datapacket_open =
+            extract_open_tag(&raw, "DATAPACKET").unwrap_or_else(|| DEFAULT_DATAPACKET_OPEN.into());
+        let params_xml = extract_params(&raw).unwrap_or_else(|| DEFAULT_PARAMS.into());
+
         let mut reader = Reader::from_file(path)
             .with_context(|| format!("abrindo {}", path.display()))?;
         reader.config_mut().trim_text(false);
@@ -129,6 +142,8 @@ impl XmlDoc {
 
         Ok(Self {
             fields: RefCell::new(fields),
+            datapacket_open,
+            params_xml,
             db,
         })
     }
@@ -141,6 +156,8 @@ impl XmlDoc {
         create_table(&db, &names)?;
         Ok(Self {
             fields: RefCell::new(vec![default_field("coluna1")]),
+            datapacket_open: DEFAULT_DATAPACKET_OPEN.into(),
+            params_xml: DEFAULT_PARAMS.into(),
             db,
         })
     }
@@ -159,7 +176,7 @@ impl XmlDoc {
             bail!("já existe uma coluna com esse nome");
         }
         self.db
-            .execute(&format!("ALTER TABLE dados ADD COLUMN \"{}\" TEXT", name), [])?;
+            .execute(&format!("ALTER TABLE dados ADD COLUMN {} TEXT", quote_ident(name)), [])?;
         self.fields.borrow_mut().push(default_field(name));
         Ok(())
     }
@@ -177,7 +194,11 @@ impl XmlDoc {
             bail!("já existe uma coluna com esse nome");
         }
         self.db.execute(
-            &format!("ALTER TABLE dados RENAME COLUMN \"{}\" TO \"{}\"", old, new),
+            &format!(
+                "ALTER TABLE dados RENAME COLUMN {} TO {}",
+                quote_ident(old),
+                quote_ident(new)
+            ),
             [],
         )?;
         if let Some(f) = self.fields.borrow_mut().iter_mut().find(|f| f.name == old) {
@@ -197,7 +218,7 @@ impl XmlDoc {
             bail!("o documento precisa de ao menos uma coluna");
         }
         self.db
-            .execute(&format!("ALTER TABLE dados DROP COLUMN \"{}\"", name), [])?;
+            .execute(&format!("ALTER TABLE dados DROP COLUMN {}", quote_ident(name)), [])?;
         self.fields.borrow_mut().retain(|f| f.name != name);
         Ok(())
     }
@@ -208,7 +229,7 @@ impl XmlDoc {
         if names.is_empty() {
             bail!("documento sem colunas");
         }
-        let mut cols: Vec<String> = names.iter().map(|n| format!("\"{}\"", n)).collect();
+        let mut cols: Vec<String> = names.iter().map(|n| quote_ident(n)).collect();
         cols.push("\"__ord\"".to_string());
         let mut vals: Vec<String> = names.iter().map(|_| "''".to_string()).collect();
         vals.push(ord.to_string());
@@ -301,14 +322,14 @@ impl XmlDoc {
     }
 
     pub fn update_cell(&self, rowid: i64, column: &str, value: &str) -> Result<()> {
-        let sql = format!("UPDATE dados SET \"{}\" = ?1 WHERE rowid = ?2", column);
+        let sql = format!("UPDATE dados SET {} = ?1 WHERE rowid = ?2", quote_ident(column));
         self.db.execute(&sql, rusqlite::params![value, rowid])?;
         Ok(())
     }
 
     /// Soma valores numéricos de uma coluna. Retorna (total, qtd_numéricos).
     pub fn sum_column(&self, column: &str, where_clause: Option<&str>) -> Result<(f64, usize)> {
-        let mut sql = format!("SELECT \"{}\" FROM dados", column);
+        let mut sql = format!("SELECT {} FROM dados", quote_ident(column));
         if let Some(w) = where_clause {
             if !w.trim().is_empty() {
                 sql.push_str(" WHERE ");
@@ -334,7 +355,8 @@ impl XmlDoc {
         let names = self.field_names();
         let mut out = String::with_capacity(1024 * 1024);
         out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>  ");
-        out.push_str("<DATAPACKET Version=\"2.0\"><METADATA><FIELDS>");
+        out.push_str(&self.datapacket_open);
+        out.push_str("<METADATA><FIELDS>");
         for f in self.fields.borrow().iter() {
             out.push_str("<FIELD");
             for (k, v) in &f.attrs {
@@ -346,12 +368,12 @@ impl XmlDoc {
             }
             out.push_str("/>");
         }
-        out.push_str("</FIELDS><PARAMS/></METADATA><ROWDATA>");
+        out.push_str("</FIELDS>");
+        out.push_str(&self.params_xml);
+        out.push_str("</METADATA><ROWDATA>");
 
-        let sql = format!(
-            "SELECT \"{}\" FROM dados ORDER BY __ord",
-            names.join("\", \"")
-        );
+        let cols = names.iter().map(|n| quote_ident(n)).collect::<Vec<_>>().join(", ");
+        let sql = format!("SELECT {cols} FROM dados ORDER BY __ord");
         let mut stmt = self.db.prepare(&sql)?;
         let mut q = stmt.query([])?;
         while let Some(r) = q.next()? {
@@ -404,8 +426,49 @@ impl XmlDoc {
     }
 }
 
+/// Coloca um nome de coluna entre aspas duplas, duplicando aspas internas, para
+/// uso seguro em SQL (nomes podem conter espaços, aspas ou caracteres especiais
+/// vindos dos atributos do XML ou de um rename do usuário).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+const DEFAULT_DATAPACKET_OPEN: &str = "<DATAPACKET Version=\"2.0\">";
+const DEFAULT_PARAMS: &str = "<PARAMS/>";
+
+/// Extrai a tag de abertura `<TAG ...>` (inclusive o `>`) do texto cru.
+/// Retorna `None` se a tag não existir.
+fn extract_open_tag(raw: &str, tag: &str) -> Option<String> {
+    let start = raw.find(&format!("<{tag}"))?;
+    // garante que é a tag exata (próximo char é espaço, '>' ou '/')
+    let after = raw[start + 1 + tag.len()..].chars().next()?;
+    if !(after.is_whitespace() || after == '>' || after == '/') {
+        return None;
+    }
+    let end = raw[start..].find('>')? + start;
+    Some(raw[start..=end].to_string())
+}
+
+/// Extrai a seção `<PARAMS.../>` ou `<PARAMS>...</PARAMS>` literal do texto cru.
+fn extract_params(raw: &str) -> Option<String> {
+    let start = raw.find("<PARAMS")?;
+    let after = raw[start + "<PARAMS".len()..].chars().next()?;
+    if !(after.is_whitespace() || after == '>' || after == '/') {
+        return None;
+    }
+    let open_end = raw[start..].find('>')? + start;
+    // Auto-fechada: `<PARAMS .../>`
+    if raw.as_bytes().get(open_end.wrapping_sub(1)) == Some(&b'/') {
+        return Some(raw[start..=open_end].to_string());
+    }
+    // Com conteúdo: fecha em `</PARAMS>`
+    let close = raw[open_end..].find("</PARAMS>")? + open_end;
+    let close_end = close + "</PARAMS>".len();
+    Some(raw[start..close_end].to_string())
+}
+
 fn create_table(conn: &Connection, names: &[String]) -> Result<()> {
-    let mut cols: Vec<String> = names.iter().map(|n| format!("\"{}\" TEXT", n)).collect();
+    let mut cols: Vec<String> = names.iter().map(|n| format!("{} TEXT", quote_ident(n))).collect();
     // coluna interna de ordenação (não exibida, não salva nos FIELDS)
     cols.push("\"__ord\" REAL".to_string());
     conn.execute(&format!("CREATE TABLE dados ({})", cols.join(", ")), [])?;
@@ -415,7 +478,7 @@ fn create_table(conn: &Connection, names: &[String]) -> Result<()> {
 fn build_insert(names: &[String]) -> String {
     let cols = names
         .iter()
-        .map(|n| format!("\"{}\"", n))
+        .map(|n| quote_ident(n))
         .collect::<Vec<_>>()
         .join(", ");
     let ph = (1..=names.len())
@@ -512,7 +575,7 @@ mod tests {
         assert_eq!(f.columns[0], "_rid");
 
         // soma da coluna numérica
-        let (total, count) = dp.sum_column("valor").unwrap();
+        let (total, count) = dp.sum_column("valor", None).unwrap();
         assert_eq!(count, 2);
         assert!((total - 14.75).abs() < 0.001, "total={total}");
 
@@ -557,5 +620,55 @@ mod tests {
         let depois = dp2.filter(None).unwrap();
         let hist_depois = hist_of(&depois);
         assert_eq!(hist_antes, hist_depois, "quebras de linha perdidas no round-trip");
+    }
+
+    /// A tag <DATAPACKET> (Version) e a seção <PARAMS> com conteúdo devem
+    /// sobreviver ao salvar/reabrir.
+    #[test]
+    fn roundtrip_preserva_datapacket_e_params() {
+        let xml = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+            "<DATAPACKET Version=\"3.1\"><METADATA><FIELDS>",
+            "<FIELD attrname=\"id\" fieldtype=\"string\" WIDTH=\"10\"/>",
+            "</FIELDS>",
+            "<PARAMS><PARAM Name=\"LCID\" fieldtype=\"i4\" VALUE=\"1046\"/></PARAMS>",
+            "</METADATA><ROWDATA>",
+            "<ROW id=\"1\"/>",
+            "</ROWDATA></DATAPACKET>",
+        );
+        let p = std::env::temp_dir().join("lexml_frame.xml");
+        std::fs::write(&p, xml).unwrap();
+
+        let dp = XmlDoc::open(&p).unwrap();
+        let tmp = std::env::temp_dir().join("lexml_frame_out.xml");
+        dp.save(&tmp).unwrap();
+        let out = std::fs::read_to_string(&tmp).unwrap();
+
+        assert!(out.contains("<DATAPACKET Version=\"3.1\">"), "Version perdida: {out}");
+        assert!(
+            out.contains("<PARAMS><PARAM Name=\"LCID\" fieldtype=\"i4\" VALUE=\"1046\"/></PARAMS>"),
+            "PARAMS perdido: {out}"
+        );
+    }
+
+    /// Uma coluna com aspas no nome não deve quebrar o SQL (deve abrir como tabela).
+    #[test]
+    fn nome_de_coluna_com_aspas() {
+        let xml = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+            "<DATAPACKET Version=\"2.0\"><METADATA><FIELDS>",
+            "<FIELD attrname=\"a&quot;b\" fieldtype=\"string\" WIDTH=\"10\"/>",
+            "</FIELDS><PARAMS/></METADATA><ROWDATA>",
+            "<ROW/>",
+            "</ROWDATA></DATAPACKET>",
+        );
+        let p = std::env::temp_dir().join("lexml_quote.xml");
+        std::fs::write(&p, xml).unwrap();
+
+        let dp = XmlDoc::open(&p).unwrap();
+        assert_eq!(dp.field_names(), vec!["a\"b".to_string()]);
+        // operações que montam SQL com o nome não devem falhar
+        dp.add_row().unwrap();
+        assert_eq!(dp.row_count(), 2);
     }
 }

@@ -299,6 +299,39 @@ fn install_doc(
     window.set_title(Some(&format!("{file_label} — Lê-XML")));
 }
 
+/// Resultado do carregamento feito em segundo plano (fora da thread de UI).
+/// `XmlDoc` é `Send` (contém apenas `RefCell`/`Connection`/`String`), então o
+/// parse pesado (XML + carga no SQLite) roda no pool de threads da GIO e só o
+/// resultado pronto volta para a main thread para montar os widgets.
+enum Loaded {
+    Table(XmlDoc),
+    Text(String),
+}
+
+/// Página central com spinner exibida enquanto o arquivo carrega.
+fn build_loading() -> gtk::Box {
+    let page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    let spinner = gtk::Spinner::new();
+    spinner.set_size_request(48, 48);
+    spinner.start();
+    page.append(&spinner);
+    let lbl = gtk::Label::new(Some(tr("loading")));
+    lbl.add_css_class("dim-label");
+    page.append(&lbl);
+    page
+}
+
+/// Mostra imediatamente a janela com um spinner e carrega o arquivo em segundo
+/// plano; ao terminar, troca o spinner pela tabela (ou pelo editor de texto).
+/// Assim o duplo-clique no .xml abre a janela na hora, sem o usuário achar que
+/// nada aconteceu e clicar várias vezes.
 fn open_into(
     path: &Path,
     window: &gtk::ApplicationWindow,
@@ -306,21 +339,52 @@ fn open_into(
     current: &Rc<RefCell<Option<OpenDoc>>>,
     title: &TitleWidget,
 ) {
-    let doc = match XmlDoc::open(path) {
-        Ok(dp) => OpenDoc::Table(DocumentView::new(dp, path.to_path_buf())),
-        Err(_) => {
-            // XML que não segue a estrutura de tabela → editor de texto comum
-            let contents = std::fs::read(path)
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
-            OpenDoc::Text(TextDocView::new(path.to_path_buf(), &contents))
-        }
-    };
     let label = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "arquivo".into());
-    install_doc(doc, window, stack, current, title, &label);
+
+    // Exibe a página de carregamento de imediato.
+    if stack.child_by_name("loading").is_none() {
+        let page = build_loading();
+        stack.add_named(&page, Some("loading"));
+    }
+    stack.set_visible_child_name("loading");
+    title.set(&label, tr("loading"));
+    window.set_title(Some(&format!("{label} — Lê-XML")));
+
+    // Parse pesado no pool de threads da GIO.
+    let path_bg = path.to_path_buf();
+    let handle = gio::spawn_blocking(move || match XmlDoc::open(&path_bg) {
+        Ok(dp) => Loaded::Table(dp),
+        Err(_) => {
+            // XML que não segue a estrutura de tabela → editor de texto comum
+            let contents = std::fs::read(&path_bg)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            Loaded::Text(contents)
+        }
+    });
+
+    // Retoma na main thread para montar os widgets e instalar o documento.
+    let path_ui = path.to_path_buf();
+    let window = window.clone();
+    let stack = stack.clone();
+    let current = current.clone();
+    let title = title.clone();
+    glib::spawn_future_local(async move {
+        let doc = match handle.await {
+            Ok(Loaded::Table(dp)) => OpenDoc::Table(DocumentView::new(dp, path_ui)),
+            Ok(Loaded::Text(contents)) => {
+                OpenDoc::Text(TextDocView::new(path_ui, &contents))
+            }
+            Err(_) => {
+                dialog::error(Some(window.upcast_ref()), tr("open_error"));
+                return;
+            }
+        };
+        install_doc(doc, &window, &stack, &current, &title, &label);
+    });
 }
 
 fn blank_into(
