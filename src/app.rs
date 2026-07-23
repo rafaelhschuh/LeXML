@@ -10,6 +10,10 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+/// Identificador do app (reverse-DNS). Deve ser IGUAL ao nome do arquivo
+/// `.desktop` e do ícone, para o compositor associar a janela ao lançador
+/// (ícone correto na barra/dock, não só no menu de apps).
+const APP_ID: &str = "br.dev.schuh.lexml";
 const REPO_URL: &str = "https://github.com/rafaelhschuh/LeXML";
 const AUTHOR: &str = "Rafael H. Schuh";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -628,12 +632,17 @@ pub fn run() -> glib::ExitCode {
     i18n::set_lang(i18n::from_code(&cfg.lang));
 
     let app = gtk::Application::builder()
-        .application_id("com.empresa.lexml")
+        .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
 
     let theme = cfg.theme.clone();
     app.connect_startup(move |_| {
+        // Declara o ícone padrão das janelas com o nome do app (= .desktop =
+        // ícone instalado). Ajuda o ícone a aparecer na barra/dock, não só no
+        // menu de apps.
+        gtk::Window::set_default_icon_name(APP_ID);
+
         // Carrega CSS customizado para indicar a célula em foco na grade
         let provider = gtk::CssProvider::new();
         provider.load_from_string(

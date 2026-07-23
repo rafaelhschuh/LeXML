@@ -6,7 +6,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$HERE"
 
-APPID="com.empresa.lexml"
+APPID="br.dev.schuh.lexml"
 BIN="lexml-gtk"
 TOOLS="$HERE/.appimage-tools"
 mkdir -p "$TOOLS"
