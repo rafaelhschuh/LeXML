@@ -102,6 +102,15 @@ HOOK="$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
 if [ -f "$HOOK" ] && ! grep -q 'Lê-XML: tema da DE atual' "$HOOK"; then
 cat >> "$HOOK" <<'EOF'
 
+# ===== Lê-XML: backend GDK — preferir Wayland =====
+# O plugin gtk força GDK_BACKEND=x11 (comentário padrão "Crash with Wayland
+# backend on Wayland" — genérico do upstream, NÃO observado neste app). Sob
+# XWayland qualquer travada momentânea do laço principal congela a entrada do
+# servidor X para a sessão inteira (teclado preso dentro e fora do app). Como o
+# build nativo (cargo run) roda liso no Wayland, preferimos Wayland aqui e só
+# caímos para X11 quando não há sessão Wayland. Override manual: LEXML_GDK_BACKEND.
+export GDK_BACKEND="${LEXML_GDK_BACKEND:-wayland,x11}"
+
 # ===== Lê-XML: loader SVG do gdk-pixbuf (senão ícones simbólicos quebram) =====
 # O loaders.cache empacotado tem caminhos relativos + LoaderDir do host de
 # compilação; dentro do AppImage montado (/tmp/.mount_*) a GTK não acha o loader
