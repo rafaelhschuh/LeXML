@@ -1,6 +1,6 @@
 use crate::document::DocumentView;
 use crate::textdoc::TextDocView;
-use crate::xmldoc::XmlDoc;
+use crate::xmldoc::{QueryResult, XmlDoc};
 use crate::{config, dialog, i18n};
 use crate::i18n::tr;
 use gtk::glib::clone;
@@ -37,6 +37,13 @@ impl OpenDoc {
         match self {
             OpenDoc::Table(d) => d.save_then(after),
             OpenDoc::Text(d) => d.save_then(after),
+        }
+    }
+    /// Libera os recursos pesados do documento (store de linhas, colunas) ao
+    /// ser substituído por outro — evita acúmulo de memória entre aberturas.
+    fn teardown(&self) {
+        if let OpenDoc::Table(d) = self {
+            d.teardown();
         }
     }
 }
@@ -278,6 +285,10 @@ fn build_placeholder() -> (gtk::Box, gtk::Button) {
 }
 
 /// Substitui o documento exibido na pilha e atualiza título/estado.
+/// Instala `doc` no stack. `reveal` controla se a tabela/texto já aparece: na
+/// abertura de tabela grande passamos `false` para manter o spinner visível até
+/// o carregamento em blocos terminar; `true` mostra imediatamente. O documento
+/// anterior é liberado (`teardown`) para não acumular memória entre aberturas.
 fn install_doc(
     doc: OpenDoc,
     window: &gtk::ApplicationWindow,
@@ -285,26 +296,42 @@ fn install_doc(
     current: &Rc<RefCell<Option<OpenDoc>>>,
     title: &TitleWidget,
     file_label: &str,
+    reveal: bool,
 ) {
+    if let Some(old) = current.borrow_mut().take() {
+        old.teardown();
+    }
     if let Some(child) = stack.child_by_name("doc") {
         stack.remove(&child);
     }
     let widget = doc.widget();
     stack.add_named(&widget, Some("doc"));
-    stack.set_visible_child_name("doc");
     *current.borrow_mut() = Some(doc);
 
+    if reveal {
+        reveal_doc(window, stack, title, file_label);
+    }
+}
+
+/// Torna a página do documento visível e ajusta o título (fim do carregamento).
+fn reveal_doc(
+    window: &gtk::ApplicationWindow,
+    stack: &gtk::Stack,
+    title: &TitleWidget,
+    file_label: &str,
+) {
+    stack.set_visible_child_name("doc");
     // título: nome do arquivo em cima, nome do app embaixo (só com arquivo aberto)
     title.set(file_label, "Lê-XML");
     window.set_title(Some(&format!("{file_label} — Lê-XML")));
 }
 
 /// Resultado do carregamento feito em segundo plano (fora da thread de UI).
-/// `XmlDoc` é `Send` (contém apenas `RefCell`/`Connection`/`String`), então o
-/// parse pesado (XML + carga no SQLite) roda no pool de threads da GIO e só o
-/// resultado pronto volta para a main thread para montar os widgets.
+/// `XmlDoc` e `QueryResult` são `Send`, então tanto o parse (XML → SQLite)
+/// quanto a consulta inicial completa rodam no pool de threads da GIO; só o
+/// resultado pronto volta para a main thread para montar os widgets em blocos.
 enum Loaded {
-    Table(XmlDoc),
+    Table(XmlDoc, QueryResult),
     Text(String),
 }
 
@@ -353,16 +380,17 @@ fn open_into(
     title.set(&label, tr("loading"));
     window.set_title(Some(&format!("{label} — Lê-XML")));
 
-    // Parse pesado no pool de threads da GIO.
+    // Parse pesado + consulta inicial completa, ambos no pool de threads da GIO
+    // (fora da thread de UI). Só dados prontos voltam para a main thread.
     let path_bg = path.to_path_buf();
     let handle = gio::spawn_blocking(move || match XmlDoc::open(&path_bg) {
-        Ok(dp) => Loaded::Table(dp),
+        Ok(dp) => match dp.filter(None) {
+            Ok(res) => Loaded::Table(dp, res),
+            Err(_) => Loaded::Text(read_text(&path_bg)),
+        },
         Err(_) => {
             // XML que não segue a estrutura de tabela → editor de texto comum
-            let contents = std::fs::read(&path_bg)
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
-            Loaded::Text(contents)
+            Loaded::Text(read_text(&path_bg))
         }
     });
 
@@ -373,18 +401,42 @@ fn open_into(
     let current = current.clone();
     let title = title.clone();
     glib::spawn_future_local(async move {
-        let doc = match handle.await {
-            Ok(Loaded::Table(dp)) => OpenDoc::Table(DocumentView::new(dp, path_ui)),
+        match handle.await {
+            Ok(Loaded::Table(dp, initial)) => {
+                let view = DocumentView::new(dp, path_ui);
+                // Instala a tabela mas mantém o spinner até a carga terminar.
+                install_doc(
+                    OpenDoc::Table(view.clone()),
+                    &window,
+                    &stack,
+                    &current,
+                    &title,
+                    &label,
+                    false,
+                );
+                // Carrega as linhas em blocos; ao concluir, revela a tabela.
+                let (window, stack, title) = (window.clone(), stack.clone(), title.clone());
+                let label = label.clone();
+                view.load_initial(initial, move || {
+                    reveal_doc(&window, &stack, &title, &label);
+                });
+            }
             Ok(Loaded::Text(contents)) => {
-                OpenDoc::Text(TextDocView::new(path_ui, &contents))
+                let doc = OpenDoc::Text(TextDocView::new(path_ui, &contents));
+                install_doc(doc, &window, &stack, &current, &title, &label, true);
             }
             Err(_) => {
                 dialog::error(Some(window.upcast_ref()), tr("open_error"));
-                return;
             }
-        };
-        install_doc(doc, &window, &stack, &current, &title, &label);
+        }
     });
+}
+
+/// Lê um arquivo como texto (UTF-8, com perda tolerada) para o modo texto.
+fn read_text(path: &Path) -> String {
+    std::fs::read(path)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
 }
 
 fn blank_into(
@@ -395,8 +447,17 @@ fn blank_into(
 ) {
     match XmlDoc::new_empty() {
         Ok(dp) => {
-            let doc = OpenDoc::Table(DocumentView::new(dp, PathBuf::from("novo.xml")));
-            install_doc(doc, window, stack, current, title, "novo.xml");
+            let view = DocumentView::new(dp, PathBuf::from("novo.xml"));
+            install_doc(
+                OpenDoc::Table(view.clone()),
+                window,
+                stack,
+                current,
+                title,
+                "novo.xml",
+                true,
+            );
+            view.load_blank();
         }
         Err(e) => dialog::error(Some(window.upcast_ref()), &e.to_string()),
     }

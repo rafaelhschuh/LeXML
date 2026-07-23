@@ -18,6 +18,13 @@ struct State {
     path: PathBuf,
     saved_path: RefCell<Option<PathBuf>>, // caminho em disco já conhecido (Salvar sobrescreve)
     last_filter: RefCell<String>, // último WHERE aplicado (para recarregar)
+    // Geração da carga atual: cada recarga (abertura, filtro, SQL, reload)
+    // incrementa este contador; um carregador em blocos em andamento verifica-o
+    // e para assim que fica obsoleto (cancelamento de carga antiga).
+    generation: Cell<u64>,
+    // `true` enquanto o carregamento em blocos ainda não terminou — bloqueia
+    // ações estruturais (inserir/mover/clonar/excluir) sobre um store parcial.
+    loading: Cell<bool>,
 }
 
 pub struct DocumentView {
@@ -31,6 +38,9 @@ pub struct DocumentView {
     menu: gtk::PopoverMenu,
     ctx_rowid: Cell<i64>,
     ctx_col: Cell<usize>,
+    // Geração da busca com debounce: cada tecla incrementa; o timeout só executa
+    // a busca se sua geração ainda for a atual (evita varredura por tecla).
+    search_gen: Cell<u64>,
 }
 
 impl DocumentView {
@@ -45,6 +55,8 @@ impl DocumentView {
             saved_path: RefCell::new(if path.is_absolute() { Some(path.clone()) } else { None }),
             path,
             last_filter: RefCell::new(String::new()),
+            generation: Cell::new(0),
+            loading: Cell::new(false),
         });
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -176,6 +188,7 @@ impl DocumentView {
             menu,
             ctx_rowid: Cell::new(-1),
             ctx_col: Cell::new(0),
+            search_gen: Cell::new(0),
         });
 
         // ações do menu de contexto
@@ -230,16 +243,44 @@ impl DocumentView {
         save_btn.connect_clicked(clone!(@strong me => move |_| me.do_save()));
         csv_btn.connect_clicked(clone!(@strong me => move |_| me.do_export_csv()));
 
+        // Busca com debounce: cada tecla agenda a busca ~250 ms depois; teclas
+        // subsequentes invalidam o agendamento anterior (via geração). Assim uma
+        // varredura O(linhas×colunas) não roda a cada tecla numa tabela grande.
         find_entry.connect_search_changed(clone!(@strong me => move |e| {
-            me.find_next(&e.text());
+            let text = e.text().to_string();
+            let g = me.search_gen.get().wrapping_add(1);
+            me.search_gen.set(g);
+            let me2 = me.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                if me2.search_gen.get() == g {
+                    me2.find_next(&text);
+                }
+            });
         }));
+        // Enter busca imediatamente (sem esperar o debounce).
         find_entry.connect_activate(clone!(@strong me => move |e| {
+            me.search_gen.set(me.search_gen.get().wrapping_add(1));
             me.find_next(&e.text());
         }));
 
-        // carga inicial (tabela completa)
-        me.apply_filter("");
+        // A carga inicial (completa) é disparada por quem cria a view
+        // (`load_initial`/`load_blank`), fora da thread de UI e em blocos.
         me
+    }
+
+    /// Carrega o resultado inicial (já consultado em segundo plano) em blocos,
+    /// chamando `on_done` quando a última linha entra no store.
+    pub fn load_initial(self: &Rc<Self>, initial: QueryResult, on_done: impl Fn() + 'static) {
+        *self.state.editable.borrow_mut() = true;
+        *self.state.last_filter.borrow_mut() = String::new();
+        let n = initial.rows.len();
+        self.status.set_text(&format!("Total: {n}"));
+        self.load_result_chunked(initial, true, Some(Box::new(on_done)));
+    }
+
+    /// Carga de um documento em branco/novo (tabela vazia ou pequena).
+    pub fn load_blank(self: &Rc<Self>) {
+        self.apply_filter("");
     }
 
     fn apply_filter(self: &Rc<Self>, where_clause: &str) {
@@ -247,7 +288,6 @@ impl DocumentView {
             Ok(res) => {
                 *self.state.editable.borrow_mut() = true;
                 *self.state.last_filter.borrow_mut() = where_clause.to_string();
-                self.load_result(&res, true);
                 let n = res.rows.len();
                 let extra = if where_clause.trim().is_empty() {
                     String::new()
@@ -255,6 +295,7 @@ impl DocumentView {
                     format!("  ·  filtro: {where_clause}")
                 };
                 self.status.set_text(&format!("Total: {n}{extra}"));
+                self.load_result_chunked(res, true, None);
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("filter_error"))),
         }
@@ -429,44 +470,105 @@ impl DocumentView {
         match self.state.dp.query(sql) {
             Ok(res) => {
                 *self.state.editable.borrow_mut() = false;
-                self.load_result(&res, false);
                 let n = res.rows.len();
                 self.status
                     .set_text(&format!("Total: {n}  ·  SQL (somente leitura): {sql}"));
+                self.load_result_chunked(res, false, None);
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("sql_error"))),
         }
     }
 
-    fn load_result(self: &Rc<Self>, res: &QueryResult, editable: bool) {
-        // separa _rid das colunas visíveis
+    /// Substitui o conteúdo da tabela pelos dados de `res`, construindo os
+    /// `RowObject` em BLOCOS via `idle_add_local` — assim o laço principal do
+    /// GTK processa entrada/redesenho entre os blocos e o teclado não congela
+    /// (crítico sob XWayland). Ao terminar chama `on_done` (usado na abertura
+    /// para revelar a tabela só quando ela está pronta).
+    fn load_result_chunked(
+        self: &Rc<Self>,
+        res: QueryResult,
+        editable: bool,
+        on_done: Option<Box<dyn Fn()>>,
+    ) {
+        // separa _rid/__ord das colunas visíveis
         let rid_idx = res.columns.iter().position(|c| c == "_rid");
-        let visible: Vec<(usize, String)> = res
+        let vis_idx: Vec<usize> = res
             .columns
             .iter()
             .enumerate()
             .filter(|(_, c)| *c != "_rid" && *c != "__ord")
-            .map(|(i, c)| (i, c.clone()))
+            .map(|(i, _)| i)
             .collect();
-        let vis_names: Vec<String> = visible.iter().map(|(_, c)| c.clone()).collect();
+        let vis_names: Vec<String> = vis_idx.iter().map(|&i| res.columns[i].clone()).collect();
 
         *self.state.columns.borrow_mut() = vis_names.clone();
         self.rebuild_columns(&vis_names);
 
-        let objs: Vec<RowObject> = res
-            .rows
-            .iter()
-            .map(|row| {
+        // Nova geração: cancela qualquer carregador anterior ainda em voo e
+        // limpa o store (libera os RowObjects antigos).
+        let generation = self.state.generation.get().wrapping_add(1);
+        self.state.generation.set(generation);
+        self.state.loading.set(true);
+        self.store.remove_all();
+
+        // Invertemos uma vez (O(n)); depois consumimos com `pop()` (O(1) por
+        // linha) para liberar memória progressivamente sem custo quadrático.
+        let mut rows = res.rows;
+        rows.reverse();
+
+        let store = self.store.clone();
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local(move || {
+            const CHUNK: usize = 2000;
+            let Some(me) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if me.state.generation.get() != generation {
+                return glib::ControlFlow::Break; // carga obsoleta → aborta
+            }
+            let mut chunk: Vec<RowObject> = Vec::with_capacity(CHUNK.min(rows.len()));
+            for _ in 0..CHUNK {
+                let Some(mut row) = rows.pop() else { break };
                 let rowid = rid_idx
                     .and_then(|i| row.get(i))
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(-1);
-                let values: Vec<String> = visible.iter().map(|(i, _)| row[*i].clone()).collect();
-                RowObject::new(rowid, values, editable)
-            })
-            .collect();
-        // Uma única operação em lote em vez de 50k append (evita custo quadrático).
-        self.store.splice(0, self.store.n_items(), &objs);
+                // move os valores visíveis para fora da linha (sem clonar o heap)
+                let values: Vec<String> =
+                    vis_idx.iter().map(|&i| std::mem::take(&mut row[i])).collect();
+                chunk.push(RowObject::new(rowid, values, editable));
+            }
+            if !chunk.is_empty() {
+                store.splice(store.n_items(), 0, &chunk);
+            }
+            if rows.is_empty() {
+                me.state.loading.set(false);
+                if let Some(cb) = &on_done {
+                    cb();
+                }
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+
+    /// Libera os recursos pesados deste documento (chamado ao trocar de arquivo):
+    /// cancela um carregamento em voo, esvazia o store (solta todos os
+    /// `RowObject`) e remove as colunas. Isso garante que a tabela anterior não
+    /// permaneça em memória mesmo que o shell da view seja mantido vivo por
+    /// algum handler — evitando o acúmulo que levava ao OOM/"AppRun.wrapped".
+    pub fn teardown(&self) {
+        self.state.generation.set(self.state.generation.get().wrapping_add(1));
+        self.state.loading.set(false);
+        self.store.remove_all();
+        let cols = self.colview.columns();
+        for i in (0..cols.n_items()).rev() {
+            if let Some(obj) = cols.item(i) {
+                self.colview
+                    .remove_column(&obj.downcast::<gtk::ColumnViewColumn>().unwrap());
+            }
+        }
     }
 
     fn rebuild_columns(self: &Rc<Self>, names: &[String]) {
@@ -481,7 +583,11 @@ impl DocumentView {
 
         for (idx, name) in names.iter().enumerate() {
             let factory = gtk::SignalListItemFactory::new();
-            let me = self.clone();
+            // Capturas FRACAS: os closures das factories/gestos vivem dentro de
+            // widgets que pertencem a esta view. Se capturassem `Rc` forte,
+            // formariam um ciclo (view → colview → factory → closure → view) e a
+            // tabela anterior nunca seria liberada ao abrir outro arquivo.
+            let me = Rc::downgrade(self);
             let col_idx = idx;
 
             factory.connect_setup(move |_, list_item| {
@@ -500,6 +606,9 @@ impl DocumentView {
                 // Controlador de navegação por teclado
                 let key_ctrl = gtk::EventControllerKey::new();
                 key_ctrl.connect_key_pressed(move |ctrl, keyval, _code, _state| {
+                    let Some(me_key) = me_key.upgrade() else {
+                        return glib::Propagation::Proceed;
+                    };
                     let lbl = ctrl.widget().unwrap().downcast::<gtk::EditableLabel>().unwrap();
                     if lbl.is_editing() {
                         // Tab/Shift+Tab: commita e move o foco manualmente. Sem isso,
@@ -596,6 +705,7 @@ impl DocumentView {
                 // EditableLabel, evitando que apareça o menu padrão (copiar/colar).
                 gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
                 gesture.connect_pressed(move |g, _, x, y| {
+                    let Some(me_ctx) = me_ctx.upgrade() else { return };
                     g.set_state(gtk::EventSequenceState::Claimed);
                     if let Some(item) = li_ctx.item() {
                         if let Ok(row) = item.downcast::<RowObject>() {
@@ -630,6 +740,7 @@ impl DocumentView {
                 sel_gesture.set_button(gdk::BUTTON_PRIMARY);
                 sel_gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
                 sel_gesture.connect_pressed(move |g, _n, _x, _y| {
+                    let Some(me_sel) = me_sel.upgrade() else { return };
                     let lbl = g.widget().unwrap().downcast::<gtk::EditableLabel>().unwrap();
                     if lbl.is_editing() {
                         return; // já editando: não interfere
@@ -662,6 +773,7 @@ impl DocumentView {
                         return;
                     }
                     row.set_value(col_idx, new_val.clone());
+                    let Some(me2) = me2.upgrade() else { return };
                     if *me2.state.editable.borrow() && row.rowid() >= 0 {
                         let col_name = me2.state.columns.borrow()[col_idx].clone();
                         if let Err(e) = me2.state.dp.update_cell(row.rowid(), &col_name, &new_val) {
@@ -673,7 +785,7 @@ impl DocumentView {
                 });
             });
 
-            let me_bind = self.clone();
+            let me_bind = Rc::downgrade(self);
             factory.connect_bind(move |_, list_item| {
                 let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
                 let row = list_item.item().unwrap().downcast::<RowObject>().unwrap();
@@ -683,7 +795,11 @@ impl DocumentView {
                     .downcast::<gtk::EditableLabel>()
                     .unwrap();
                 label.set_text(&row.value(col_idx));
-                label.set_editable(*me_bind.state.editable.borrow() && row.editable());
+                let editable = me_bind
+                    .upgrade()
+                    .map_or(false, |m| *m.state.editable.borrow())
+                    && row.editable();
+                label.set_editable(editable);
             });
 
             let column = gtk::ColumnViewColumn::new(Some(name), Some(factory));
@@ -991,8 +1107,8 @@ impl DocumentView {
     // ---------- ações do menu de contexto ----------
 
     fn ctx_insert_row(self: &Rc<Self>, above: bool) {
-        if !*self.state.editable.borrow() {
-            return; // visão somente leitura (SQL livre)
+        if !*self.state.editable.borrow() || self.state.loading.get() {
+            return; // visão somente leitura (SQL livre) ou carga em andamento
         }
         let rid = self.ctx_rowid.get();
         if rid < 0 {
@@ -1016,7 +1132,7 @@ impl DocumentView {
     }
 
     fn ctx_delete_row(self: &Rc<Self>) {
-        if !*self.state.editable.borrow() {
+        if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
         }
         let rid = self.ctx_rowid.get();
@@ -1037,7 +1153,7 @@ impl DocumentView {
     }
 
     fn ctx_clone_row(self: &Rc<Self>, above: bool) {
-        if !*self.state.editable.borrow() {
+        if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
         }
         let rid = self.ctx_rowid.get();
@@ -1060,7 +1176,7 @@ impl DocumentView {
     }
 
     fn ctx_move_row(self: &Rc<Self>, up: bool) {
-        if !*self.state.editable.borrow() {
+        if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
         }
         let rid = self.ctx_rowid.get();
@@ -1089,7 +1205,7 @@ impl DocumentView {
     }
 
     fn ctx_add_column(self: &Rc<Self>) {
-        if !*self.state.editable.borrow() {
+        if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
         }
         // nome padrão único; o usuário renomeia inline depois (duplo-clique no cabeçalho)
@@ -1119,7 +1235,7 @@ impl DocumentView {
     }
 
     fn ctx_delete_column(self: &Rc<Self>) {
-        if !*self.state.editable.borrow() {
+        if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
         }
         let col = self.ctx_col.get();
