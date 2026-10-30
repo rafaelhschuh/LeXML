@@ -97,6 +97,11 @@ fn pt(key: &str) -> &'static str {
         "export_csv_title" => "Exportar CSV",
         "csv_export_error" => "Erro ao exportar CSV:",
         "save_error" => "Erro ao salvar:",
+        "text_readonly_status" => "Somente leitura: o arquivo não é UTF-8 válido \
+(ou é grande demais). Salvar destruiria o conteúdo original.",
+        "text_readonly_save_blocked" => "Este arquivo foi aberto somente para leitura \
+porque não é UTF-8 válido (ou excede o tamanho máximo). Gravá-lo substituiria os \
+bytes não reconhecidos e corromperia o conteúdo.",
         "cell_write_error" => "Erro ao gravar célula:",
         "filter_error" => "Erro no filtro SQL:",
         "sql_error" => "Erro SQL:",
@@ -174,6 +179,11 @@ fn en(key: &str) -> &'static str {
         "export_csv_title" => "Export CSV",
         "csv_export_error" => "Error exporting CSV:",
         "save_error" => "Error saving:",
+        "text_readonly_status" => "Read-only: the file is not valid UTF-8 \
+(or is too large). Saving would destroy the original content.",
+        "text_readonly_save_blocked" => "This file was opened read-only because it is \
+not valid UTF-8 (or exceeds the maximum size). Saving it would replace the \
+unrecognised bytes and corrupt the content.",
         "cell_write_error" => "Error writing cell:",
         "filter_error" => "SQL filter error:",
         "sql_error" => "SQL error:",

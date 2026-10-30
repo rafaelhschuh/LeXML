@@ -12,7 +12,7 @@ use std::rc::Rc;
 /// Estado compartilhado de um documento aberto.
 struct State {
     dp: XmlDoc,
-    columns: RefCell<Vec<String>>, // colunas visíveis (sem _rid)
+    columns: RefCell<Vec<String>>, // colunas visíveis (sem as de controle)
     editable: RefCell<bool>,
     dirty: RefCell<bool>,
     path: PathBuf,
@@ -343,7 +343,7 @@ impl DocumentView {
                 let cols = me.state.columns.borrow();
                 let mut shown = 0;
                 for col in cols.iter() {
-                    if col == "_rid" || col == "__ord" {
+                    if me.state.dp.is_internal_col(col) {
                         continue;
                     }
                     if col.to_lowercase().starts_with(&needle) && col.to_lowercase() != needle {
@@ -490,13 +490,14 @@ impl DocumentView {
         editable: bool,
         on_done: Option<Box<dyn Fn()>>,
     ) {
-        // separa _rid/__ord das colunas visíveis
-        let rid_idx = res.columns.iter().position(|c| c == "_rid");
+        // separa as colunas de controle das visíveis
+        let rid_name = self.state.dp.rid_alias().to_string();
+        let rid_idx = res.columns.iter().position(|c| *c == rid_name);
         let vis_idx: Vec<usize> = res
             .columns
             .iter()
             .enumerate()
-            .filter(|(_, c)| *c != "_rid" && *c != "__ord")
+            .filter(|(_, c)| !self.state.dp.is_internal_col(c))
             .map(|(i, _)| i)
             .collect();
         let vis_names: Vec<String> = vis_idx.iter().map(|&i| res.columns[i].clone()).collect();

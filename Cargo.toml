@@ -1,13 +1,13 @@
 [package]
 name = "lexml-gtk"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 description = "Leitor e editor de arquivos XML em tabela, nativo GTK4 (segue o tema do sistema)"
 license = "GPL-3.0-or-later"
 
 [dependencies]
 gtk = { version = "0.9", package = "gtk4", features = ["v4_12"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "limits"] }
 quick-xml = "0.36"
 anyhow = "1"
 

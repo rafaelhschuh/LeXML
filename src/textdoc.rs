@@ -16,10 +16,13 @@ pub struct TextDocView {
     status: gtk::Label,
     path: RefCell<PathBuf>,
     dirty: RefCell<bool>,
+    /// Arquivo que não pode ser gravado de volta sem destruí-lo (não é UTF-8
+    /// válido, ou foi cortado no teto de tamanho na leitura).
+    read_only: bool,
 }
 
 impl TextDocView {
-    pub fn new(path: PathBuf, contents: &str) -> Rc<Self> {
+    pub fn new(path: PathBuf, contents: &str, read_only: bool, note: Option<&str>) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
         let bar = gtk::Box::builder()
@@ -33,6 +36,7 @@ impl TextDocView {
 
         let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
         save_btn.set_tooltip_text(Some(tr("save_tooltip_text")));
+        save_btn.set_sensitive(!read_only);
         bar.append(&save_btn);
         root.append(&bar);
 
@@ -40,6 +44,7 @@ impl TextDocView {
         buffer.set_text(contents);
         let view = gtk::TextView::builder()
             .buffer(&buffer)
+            .editable(!read_only)
             .monospace(true)
             .left_margin(8)
             .right_margin(8)
@@ -58,7 +63,15 @@ impl TextDocView {
             .margin_bottom(4)
             .build();
         status.add_css_class("dim-label");
-        status.set_text(tr("text_mode_status"));
+        let base = if read_only {
+            tr("text_readonly_status")
+        } else {
+            tr("text_mode_status")
+        };
+        status.set_text(&match note {
+            Some(n) => format!("{base}  ·  {n}"),
+            None => base.to_string(),
+        });
         root.append(&status);
 
         let me = Rc::new(Self {
@@ -67,6 +80,7 @@ impl TextDocView {
             status,
             path: RefCell::new(path),
             dirty: RefCell::new(false),
+            read_only,
         });
 
         let me2 = me.clone();
@@ -108,11 +122,18 @@ impl TextDocView {
 
     /// Grava direto no `path` informado, atualizando o estado. Retorna `true` em sucesso.
     fn write_to(self: &Rc<Self>, path: &Path) -> bool {
+        // O buffer não representa fielmente os bytes do arquivo: gravá-lo
+        // substituiria cada byte inválido por U+FFFD (ou truncaria o arquivo
+        // no teto de leitura), destruindo o conteúdo em silêncio.
+        if self.read_only {
+            self.error(tr("text_readonly_save_blocked"));
+            return false;
+        }
         let text = self
             .buffer
             .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false)
             .to_string();
-        match std::fs::write(path, text) {
+        match crate::xmldoc::write_atomic(path, text.as_bytes()) {
             Ok(()) => {
                 *self.dirty.borrow_mut() = false;
                 *self.path.borrow_mut() = path.to_path_buf();

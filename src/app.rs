@@ -336,7 +336,7 @@ fn reveal_doc(
 /// resultado pronto volta para a main thread para montar os widgets em blocos.
 enum Loaded {
     Table(XmlDoc, QueryResult),
-    Text(String),
+    Text(TextLoad),
 }
 
 /// Página central com spinner exibida enquanto o arquivo carrega.
@@ -390,12 +390,10 @@ fn open_into(
     let handle = gio::spawn_blocking(move || match XmlDoc::open(&path_bg) {
         Ok(dp) => match dp.filter(None) {
             Ok(res) => Loaded::Table(dp, res),
-            Err(_) => Loaded::Text(read_text(&path_bg)),
+            Err(e) => Loaded::Text(read_text_with_note(&path_bg, &e)),
         },
-        Err(_) => {
-            // XML que não segue a estrutura de tabela → editor de texto comum
-            Loaded::Text(read_text(&path_bg))
-        }
+        // XML que não segue a estrutura de tabela → editor de texto comum
+        Err(e) => Loaded::Text(read_text_with_note(&path_bg, &e)),
     });
 
     // Retoma na main thread para montar os widgets e instalar o documento.
@@ -426,7 +424,12 @@ fn open_into(
                 });
             }
             Ok(Loaded::Text(contents)) => {
-                let doc = OpenDoc::Text(TextDocView::new(path_ui, &contents));
+                let doc = OpenDoc::Text(TextDocView::new(
+                    path_ui,
+                    &contents.text,
+                    contents.read_only,
+                    contents.note.as_deref(),
+                ));
                 install_doc(doc, &window, &stack, &current, &title, &label, true);
             }
             Err(_) => {
@@ -437,10 +440,46 @@ fn open_into(
 }
 
 /// Lê um arquivo como texto (UTF-8, com perda tolerada) para o modo texto.
-fn read_text(path: &Path) -> String {
-    std::fs::read(path)
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default()
+/// Teto para abrir um arquivo no editor de texto. Sem limite, um XML de vários
+/// GB é carregado inteiro na memória (e o editor do GTK fica inutilizável).
+const MAX_TEXT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Conteúdo carregado no editor de texto.
+pub struct TextLoad {
+    pub text: String,
+    /// `true` quando gravar por cima destruiria o arquivo: ou ele não é UTF-8
+    /// válido (os bytes inválidos viraram U+FFFD na leitura), ou foi cortado
+    /// no teto de tamanho. Nos dois casos o editor abre somente para leitura.
+    pub read_only: bool,
+    /// Por que o arquivo não abriu em tabela, quando houve um motivo concreto
+    /// (campo com nome inválido, METADATA ausente…). Mostrado na barra de
+    /// status para o fallback não parecer arbitrário.
+    pub note: Option<String>,
+}
+
+fn read_text(path: &Path) -> TextLoad {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut truncated = false;
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.take(MAX_TEXT_BYTES).read_to_end(&mut buf);
+        truncated = buf.len() as u64 >= MAX_TEXT_BYTES;
+    }
+    match String::from_utf8(buf) {
+        Ok(text) => TextLoad { text, read_only: truncated, note: None },
+        Err(e) => TextLoad {
+            text: String::from_utf8_lossy(e.as_bytes()).into_owned(),
+            read_only: true,
+            note: None,
+        },
+    }
+}
+
+/// Mesmo que `read_text`, guardando o motivo de o arquivo não ter aberto em tabela.
+fn read_text_with_note(path: &Path, why: &anyhow::Error) -> TextLoad {
+    let mut load = read_text(path);
+    load.note = Some(why.to_string());
+    load
 }
 
 fn blank_into(
