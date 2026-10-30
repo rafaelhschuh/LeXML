@@ -110,7 +110,7 @@ cargo fmt --all
 cargo clippy --all-targets
 ```
 
-> Na versão 0.5.3, a árvore ainda possui avisos do Clippy, principalmente pelo
+> Na versão 0.5.4, a árvore ainda possui avisos do Clippy, principalmente pelo
 > uso da sintaxe antiga do macro `glib::clone!`, além de itens não utilizados.
 > Portanto, `cargo clippy --all-targets -- -D warnings` ainda não passa.
 

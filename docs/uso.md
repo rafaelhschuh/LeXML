@@ -1,6 +1,6 @@
 # Guia de uso
 
-Este guia descreve o comportamento da versão 0.5.3 do Lê-XML.
+Este guia descreve o comportamento da versão 0.5.4 do Lê-XML.
 
 ## Conteúdo
 
@@ -64,10 +64,28 @@ Consulte [Formato XML suportado](formato-xml.md) para ver a estrutura completa.
 
 Quando o arquivo não é reconhecido como tabela, o Lê-XML mostra seu conteúdo em
 um editor monoespaçado. O rodapé exibe **Modo texto — XML sem estrutura de
-tabela**.
+tabela** e, quando há um motivo concreto para a recusa (um `FIELD` com nome
+inválido, por exemplo), acrescenta a causa.
 
 O modo texto oferece edição e salvamento, mas não disponibiliza filtros, SQL,
 soma, operações de linha ou coluna e exportação CSV.
+
+### Modo texto somente leitura
+
+Dois casos abrem o editor com a edição e o salvamento desabilitados:
+
+- o arquivo **não é UTF-8 válido** — por exemplo, um XML gravado em Latin-1;
+- o arquivo **passa de 64 MiB**, o teto de leitura do editor.
+
+Nos dois casos o texto exibido não representa fielmente os bytes do arquivo:
+gravá-lo substituiria cada byte não reconhecido por `?` (U+FFFD) ou truncaria o
+conteúdo. O rodapé explica a situação e o botão de salvar fica inativo.
+
+Para editar um arquivo em Latin-1, converta-o antes:
+
+```bash
+iconv -f ISO-8859-1 -t UTF-8 entrada.xml > saida.xml
+```
 
 ## Trabalhar com a tabela
 
@@ -114,8 +132,14 @@ O documento sempre precisa manter pelo menos uma coluna.
 ### Renomear uma coluna
 
 Dê duplo clique no título da coluna, informe o novo nome e pressione `Enter`.
-Nomes vazios ou repetidos não são aceitos. A alteração atualiza tanto a tabela
-interna quanto o atributo `attrname` do `FIELD` ao salvar.
+A alteração atualiza tanto a tabela interna quanto o atributo `attrname` do
+`FIELD` ao salvar.
+
+O nome precisa ser um **nome válido de atributo XML**, porque é exatamente isso
+que ele se torna no arquivo salvo. Valem letras (com acentos), dígitos, `_`,
+`-`, `.` e `:`, começando por letra ou `_`. Não são aceitos nomes vazios,
+repetidos, com espaços, com aspas ou iniciados por dígito — eles produziriam um
+XML inválido na gravação. A mesma regra vale para **Adicionar coluna**.
 
 Operações de edição e estrutura ficam desabilitadas enquanto uma consulta SQL
 livre está sendo exibida.
@@ -191,7 +215,29 @@ O resultado substitui temporariamente o conteúdo visível e é somente leitura 
 interface. Para voltar à visão editável, aplique novamente o filtro — vazio para
 todas as linhas ou com uma expressão `WHERE`.
 
-As colunas internas `_rid` e `__ord`, quando presentes, não são exibidas.
+As colunas internas de controle, quando presentes, não são exibidas.
+
+### A consulta é somente leitura de verdade
+
+Só são aceitas instruções iniciadas por `SELECT`, `WITH`, `VALUES` ou
+`EXPLAIN`. Qualquer outra coisa é recusada com uma mensagem de erro, antes de
+chegar ao banco:
+
+```sql
+DELETE FROM dados          -- recusado
+UPDATE dados SET nome = '' -- recusado
+DROP TABLE dados           -- recusado
+ATTACH DATABASE '/tmp/x.db' AS ev  -- recusado
+VACUUM INTO '/tmp/x.db'    -- recusado
+```
+
+A restrição não é apenas cosmética. Sem ela, um comando digitado por engano
+apagaria os dados carregados sem marcar o documento como alterado, e um
+`ATTACH` seguido de `CREATE TABLE ... AS SELECT` escreveria o conteúdo da
+tabela em qualquer arquivo do sistema. Três travas independentes garantem a
+restrição, e o banco é aberto sem a possibilidade de anexar outros arquivos.
+
+Para alterar os dados, use a edição da tabela e o menu de contexto.
 
 ## Somar uma coluna
 
@@ -225,6 +271,12 @@ No modo tabela, o XML é reconstruído a partir dos dados em memória. No modo
 texto, o conteúdo do editor é gravado como está. Veja os detalhes de preservação
 em [Formato XML suportado](formato-xml.md).
 
+A gravação é atômica: o conteúdo novo é escrito em um arquivo temporário no
+mesmo diretório e só então renomeado por cima do destino, preservando as
+permissões do arquivo substituído. Se faltar espaço em disco ou o aplicativo
+for interrompido no meio da escrita, o arquivo original continua intacto em vez
+de ficar truncado. O mesmo vale para a exportação CSV.
+
 ## Exportar CSV
 
 Clique no botão com ícone de planilha, escolha o destino e confirme.
@@ -236,9 +288,9 @@ O arquivo gerado:
 - inclui uma linha de cabeçalho;
 - coloca entre aspas campos com `;`, aspas ou quebra de linha;
 - duplica aspas internas conforme a convenção CSV;
-- não inclui as colunas internas `_rid` e `__ord`.
+- não inclui as colunas internas de controle.
 
-Na versão 0.5.3, a exportação inclui todas as linhas da tabela original, mesmo
+Na versão 0.5.4, a exportação inclui todas as linhas da tabela original, mesmo
 que um filtro ou resultado SQL esteja visível.
 
 ## Configurações
@@ -284,13 +336,17 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 
 - O modo tabela é específico para o formato descrito em
   [Formato XML suportado](formato-xml.md).
-- A consulta SQL é destinada a consultas sobre a base temporária. Use
-  preferencialmente instruções `SELECT`.
+- A consulta SQL aceita apenas leitura (`SELECT`, `WITH`, `VALUES`,
+  `EXPLAIN`); comandos de alteração são recusados.
+- Arquivos que não são UTF-8 válido, ou maiores que 64 MiB, abrem somente para
+  leitura no modo texto.
+- Nomes de coluna precisam ser nomes válidos de atributo XML.
 - O histórico de desfazer/refazer não é implementado.
 - O aplicativo não salva automaticamente.
 - Salvar um documento tabular normaliza a formatação do XML; não preserva
   indentação e espaços do arquivo original.
 - Células vazias são gravadas como atributos ausentes.
 - A exportação CSV da versão atual não respeita o filtro visível.
+- O aplicativo lê apenas arquivos em UTF-8.
 
 Voltar ao [índice da documentação](README.md).

@@ -966,6 +966,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Caminho temporário exclusivo desta execução e desta chamada. Os testes
+    /// rodam em paralelo na mesma thread pool; um nome fixo fazia um teste ler
+    /// o arquivo enquanto outro o reescrevia.
+    fn tmp_path(nome: impl std::fmt::Display) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "lexml_{}_{}_{nome}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
     /// Gera um XML mínimo no formato esperado (METADATA/FIELDS + ROWDATA/ROW).
     fn sample_xml() -> PathBuf {
         let xml = concat!(
@@ -980,7 +993,7 @@ mod tests {
             "<ROW id=\"3\" nome=\"Gama\"/>",
             "</ROWDATA></DATAPACKET>",
         );
-        let p = std::env::temp_dir().join("lexml_sample.xml");
+        let p = tmp_path("lexml_sample.xml");
         std::fs::write(&p, xml).unwrap();
         p
     }
@@ -1002,7 +1015,7 @@ mod tests {
         assert!((total - 14.75).abs() < 0.001, "total={total}");
 
         // round-trip: salvar e reabrir preserva contagem e campos
-        let tmp = std::env::temp_dir().join("lexml_roundtrip.xml");
+        let tmp = tmp_path("lexml_roundtrip.xml");
         dp.save(&tmp).unwrap();
         let dp2 = XmlDoc::open(&tmp).unwrap();
         assert_eq!(dp2.row_count(), 3);
@@ -1023,7 +1036,7 @@ mod tests {
             "<ROW id=\"1\" hist=\"linha1&#010;&#013;linha2\"/>",
             "</ROWDATA></DATAPACKET>",
         );
-        let p = std::env::temp_dir().join("lexml_ctrl.xml");
+        let p = tmp_path("lexml_ctrl.xml");
         std::fs::write(&p, xml).unwrap();
 
         let hist_of = |res: &QueryResult| -> String {
@@ -1036,7 +1049,7 @@ mod tests {
         let hist_antes = hist_of(&antes);
         assert!(hist_antes.contains('\n'), "parser deveria ter LF: {hist_antes:?}");
 
-        let tmp = std::env::temp_dir().join("lexml_ctrl_out.xml");
+        let tmp = tmp_path("lexml_ctrl_out.xml");
         dp.save(&tmp).unwrap();
         let dp2 = XmlDoc::open(&tmp).unwrap();
         let depois = dp2.filter(None).unwrap();
@@ -1058,11 +1071,11 @@ mod tests {
             "<ROW id=\"1\"/>",
             "</ROWDATA></DATAPACKET>",
         );
-        let p = std::env::temp_dir().join("lexml_frame.xml");
+        let p = tmp_path("lexml_frame.xml");
         std::fs::write(&p, xml).unwrap();
 
         let dp = XmlDoc::open(&p).unwrap();
-        let tmp = std::env::temp_dir().join("lexml_frame_out.xml");
+        let tmp = tmp_path("lexml_frame_out.xml");
         dp.save(&tmp).unwrap();
         let out = std::fs::read_to_string(&tmp).unwrap();
 
@@ -1086,7 +1099,7 @@ mod tests {
             "<ROW/>",
             "</ROWDATA></DATAPACKET>",
         );
-        let p = std::env::temp_dir().join("lexml_quote.xml");
+        let p = tmp_path("lexml_quote.xml");
         std::fs::write(&p, xml).unwrap();
         assert!(XmlDoc::open(&p).is_err());
     }
@@ -1167,7 +1180,7 @@ mod tests {
         let dp = XmlDoc::open(&sample_xml()).unwrap();
         assert_eq!(dp.row_count(), 3);
 
-        let alvo = std::env::temp_dir().join("lexml_reg_attach.db");
+        let alvo = tmp_path("lexml_reg_attach.db");
         let _ = std::fs::remove_file(&alvo);
 
         for sql in [
@@ -1208,7 +1221,7 @@ mod tests {
                  <FIELD attrname=\"{apelido}\" fieldtype=\"string\" WIDTH=\"10\"/>\
                  </FIELDS><PARAMS/></METADATA><ROWDATA><ROW/></ROWDATA></DATAPACKET>"
             );
-            let p = std::env::temp_dir().join("lexml_reg_inj.xml");
+            let p = tmp_path("lexml_reg_inj.xml");
             std::fs::write(&p, &xml).unwrap();
             assert!(
                 XmlDoc::open(&p).is_err(),
@@ -1229,7 +1242,7 @@ mod tests {
         dp.add_column("novo-campo").unwrap();
 
         // o arquivo gravado continua sendo XML relegível
-        let out = std::env::temp_dir().join("lexml_reg_nomes.xml");
+        let out = tmp_path("lexml_reg_nomes.xml");
         dp.save(&out).unwrap();
         let dp2 = XmlDoc::open(&out).unwrap();
         assert_eq!(dp2.field_names(), vec!["id", "nome.completo", "valor", "novo-campo"]);
@@ -1247,10 +1260,10 @@ mod tests {
             "</FIELDS><PARAMS real=\"1\"/></METADATA>",
             "<ROWDATA><ROW id=\"1\"/></ROWDATA></DATAPACKET>",
         );
-        let p = std::env::temp_dir().join("lexml_reg_params.xml");
+        let p = tmp_path("lexml_reg_params.xml");
         std::fs::write(&p, xml).unwrap();
         let dp = XmlDoc::open(&p).unwrap();
-        let out = std::env::temp_dir().join("lexml_reg_params_out.xml");
+        let out = tmp_path("lexml_reg_params_out.xml");
         dp.save(&out).unwrap();
         let salvo = std::fs::read_to_string(&out).unwrap();
         assert!(salvo.contains("<PARAMS real=\"1\"/>"), "{salvo}");
@@ -1267,10 +1280,10 @@ mod tests {
             "<FIELD attrname=\"id\" fieldtype=\"string\" WIDTH=\"10\"/>",
             "</FIELDS><PARAMS/></METADATA><ROWDATA><ROW id=\"1\"/></ROWDATA></DATAPACKET>",
         );
-        let p = std::env::temp_dir().join("lexml_reg_gt.xml");
+        let p = tmp_path("lexml_reg_gt.xml");
         std::fs::write(&p, xml).unwrap();
         let dp = XmlDoc::open(&p).unwrap();
-        let out = std::env::temp_dir().join("lexml_reg_gt_out.xml");
+        let out = tmp_path("lexml_reg_gt_out.xml");
         dp.save(&out).unwrap();
         assert_eq!(XmlDoc::open(&out).unwrap().row_count(), 1);
     }
@@ -1288,7 +1301,7 @@ mod tests {
                  <ROW {nome}=\"v1\" nome=\"a\"/><ROW {nome}=\"v2\" nome=\"b\"/>\
                  </ROWDATA></DATAPACKET>"
             );
-            let p = std::env::temp_dir().join(format!("lexml_reg_int_{nome}.xml"));
+            let p = tmp_path(format!("lexml_reg_int_{nome}.xml"));
             std::fs::write(&p, &xml).unwrap();
             let dp = XmlDoc::open(&p).unwrap_or_else(|e| panic!("{nome}: {e}"));
             assert_eq!(dp.row_count(), 2, "{nome}");
@@ -1306,7 +1319,7 @@ mod tests {
             assert_eq!(depois.rows[1][2], "b", "{nome}");
 
             // e o round-trip preserva o campo
-            let out = std::env::temp_dir().join(format!("lexml_reg_int_{nome}_out.xml"));
+            let out = tmp_path(format!("lexml_reg_int_{nome}_out.xml"));
             dp.save(&out).unwrap();
             assert_eq!(XmlDoc::open(&out).unwrap().field_names(), vec![nome, "nome"]);
         }
@@ -1316,8 +1329,7 @@ mod tests {
     /// pronto, nem deixar temporários para trás.
     #[test]
     fn gravacao_atomica_nao_deixa_rastro() {
-        let dir = std::env::temp_dir().join("lexml_reg_atomica");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tmp_path("atomica.d");
         std::fs::create_dir_all(&dir).unwrap();
         let alvo = dir.join("saida.xml");
 
@@ -1346,7 +1358,7 @@ mod tests {
         let rid: i64 = dp.filter(None).unwrap().rows[0][0].parse().unwrap();
         let bruto = r#"a" b' c<d>e&f"#;
         dp.update_cell(rid, "nome", bruto).unwrap();
-        let out = std::env::temp_dir().join("lexml_reg_aspas.xml");
+        let out = tmp_path("lexml_reg_aspas.xml");
         dp.save(&out).unwrap();
         let dp2 = XmlDoc::open(&out).unwrap();
         assert_eq!(dp2.filter(None).unwrap().rows[0][2], bruto);

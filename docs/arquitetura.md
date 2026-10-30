@@ -33,7 +33,10 @@ SQLite.
 | `rusqlite` | tabela temporária e consultas |
 | `anyhow` | propagação e contexto de erros |
 
-O projeto requer as APIs GTK 4.12 e usa `rusqlite` com SQLite incorporado.
+O projeto requer as APIs GTK 4.12 e usa `rusqlite` com as funcionalidades
+`bundled` (SQLite incorporado) e `limits` — esta última é usada para zerar
+`SQLITE_LIMIT_ATTACHED` e impedir que uma consulta do usuário anexe arquivos de
+banco externos.
 
 ## Módulos
 
@@ -63,15 +66,41 @@ Cada janela mantém um `OpenDoc`, que pode conter `DocumentView` ou
 
 - interpreta `FIELD` e `ROW`;
 - cria a tabela SQLite `dados`;
-- protege identificadores SQL;
-- executa filtros e consultas;
+- protege identificadores SQL (`quote_ident`);
+- valida nomes de coluna como `Name` do XML (`is_valid_xml_name`);
+- executa filtros e consultas, com as travas de somente leitura;
 - atualiza células;
 - altera linhas e colunas;
 - soma valores;
-- serializa XML e CSV.
+- serializa XML e CSV;
+- grava em disco de forma atômica (`write_atomic`, também usada por
+  `textdoc.rs`).
 
-As colunas de negócio usam `TEXT`. `__ord` mantém a ordenação e o `rowid` do
-SQLite é projetado como `_rid` nas visões editáveis.
+As colunas de negócio usam `TEXT`. A tabela tem uma chave primária interna
+explícita (`INTEGER PRIMARY KEY`, equivalente ao `rowid`) e uma coluna `REAL`
+de ordenação. Os dois nomes, mais o apelido do identificador nas visões
+editáveis, partem de `__rid`, `__ord` e `_rid` e são derivados com sufixo
+numérico se algum `FIELD` do arquivo já usar esses nomes. A chave primária
+explícita também evita que um campo chamado `rowid` encubra o identificador
+interno.
+
+### Somente leitura na consulta livre
+
+`XmlDoc::query()` passa por `run_readonly()`, que aplica, em ordem:
+
+1. `ensure_select_only()` — a instrução precisa começar por `SELECT`, `WITH`,
+   `VALUES` ou `EXPLAIN`, desprezando comentários à esquerda;
+2. `ReadOnlyGuard` — liga `PRAGMA query_only` e o desliga no `Drop`, de modo
+   que um erro ou um pânico não deixem a conexão travada;
+3. `Statement::readonly()` — rede de segurança do próprio SQLite, para o caso
+   de uma instrução de leitura na aparência escrever de fato.
+
+Somada ao `SQLITE_LIMIT_ATTACHED = 0` aplicado na abertura da conexão, a
+combinação impede tanto a perda dos dados em memória quanto a escrita de
+arquivos arbitrários no disco a partir da caixa de SQL.
+
+`filter()` e `sum_column()` também passam por `run_readonly()`, já que
+incorporam uma expressão `WHERE` escrita pelo usuário.
 
 ### `src/document.rs`
 
@@ -81,8 +110,10 @@ O resultado de uma consulta é convertido em objetos `RowObject` e inserido em
 `gio::ListStore` em blocos de 2.000 linhas. Um contador de geração cancela uma
 carga anterior quando outra visão é solicitada.
 
-Visões criadas por filtro incluem `_rid` e são editáveis. Resultados de SQL
-livre são apresentados como somente leitura.
+Visões criadas por filtro incluem o identificador de linha e são editáveis;
+`XmlDoc::rid_alias()` informa o nome dessa coluna e `is_internal_col()` diz
+quais colunas do resultado não devem ser exibidas nem exportadas. Resultados de
+SQL livre são apresentados como somente leitura.
 
 ### `src/row_object.rs`
 
@@ -96,6 +127,12 @@ Objeto GLib usado por cada linha visível. Mantém:
 
 Editor simples para arquivos que não entram no modo tabela. Controla o buffer,
 estado de alteração, salvamento direto e **Salvar como**.
+
+Recebe de `app.rs` um sinalizador `read_only` e, opcionalmente, o motivo da
+recusa do modo tabela. Com `read_only`, a `TextView` e o botão de salvar ficam
+inativos e `write_to()` recusa a gravação: o buffer não corresponde aos bytes
+do arquivo (leitura não-UTF-8 ou cortada no teto de 64 MiB) e gravá-lo
+destruiria o conteúdo.
 
 ### `src/config.rs`
 
@@ -132,7 +169,8 @@ Centraliza alertas e formulários modais feitos com GTK4 puro.
 4. `gio::spawn_blocking` executa `XmlDoc::open()` e a consulta inicial.
 5. Em caso de sucesso, a thread principal cria `DocumentView`.
 6. As linhas entram na grade em blocos.
-7. Se a interpretação tabular falhar, o conteúdo segue para `TextDocView`.
+7. Se a interpretação tabular falhar, o conteúdo segue para `TextDocView`,
+   levando junto o erro para ser exibido no rodapé.
 
 O carregamento pesado fora da thread principal e a inserção em blocos evitam
 congelar a interface com documentos grandes.
@@ -156,22 +194,29 @@ O estado alterado é usado para pedir confirmação ao fechar a janela.
 O filtro monta:
 
 ```sql
-SELECT rowid AS _rid, *
+SELECT "__rid" AS "_rid", "col1", "col2", ...
 FROM dados
 WHERE <expressão>
-ORDER BY __ord
+ORDER BY "__ord"
 ```
 
-Sem expressão, o trecho `WHERE` é omitido.
+As colunas são listadas explicitamente, em vez de `SELECT *`, para que nenhuma
+coluna de controle vaze para a grade mesmo quando o arquivo traz um campo com
+nome parecido. Sem expressão, o trecho `WHERE` é omitido.
 
-A consulta livre prepara a instrução fornecida pelo usuário diretamente no
-SQLite em memória. Seu resultado não possui uma identidade de linha garantida e
-por isso a interface desabilita edição e operações estruturais.
+A consulta livre prepara a instrução fornecida pelo usuário no SQLite em
+memória, depois de passar pelas travas de somente leitura descritas acima. Seu
+resultado não possui uma identidade de linha garantida e por isso a interface
+desabilita edição e operações estruturais.
 
 ## Decisões de desempenho
 
 - SQLite em memória com `journal_mode=OFF` e `synchronous=OFF`;
-- transação única durante a importação;
+- transação única durante a importação, com as linhas inseridas conforme o
+  parser as produz — nada de acumular o arquivo inteiro antes do primeiro
+  `INSERT`;
+- leitura do texto cru limitada a 1 MiB, só para recuperar a moldura do
+  documento (`<DATAPACKET>` e `<PARAMS>`);
 - parsing orientado a eventos com `quick-xml`;
 - abertura e consulta inicial fora da thread GTK;
 - carregamento visual em blocos;
@@ -182,8 +227,10 @@ por isso a interface desabilita edição e operações estruturais.
 
 ## Testes
 
-Os testes unitários ficam ao final de `src/xmldoc.rs` e usam arquivos temporários
-gerados em tempo de execução.
+Os testes unitários ficam ao final de `src/xmldoc.rs` e usam arquivos
+temporários gerados em tempo de execução. Monte cada caminho com o auxiliar
+`tmp_path()`: os testes rodam em paralelo e um nome fixo faz um teste ler o
+arquivo enquanto outro o reescreve, produzindo falhas intermitentes.
 
 Execute:
 
@@ -199,13 +246,22 @@ Ao alterar parsing ou serialização, inclua um teste de round-trip:
 4. salvar em outro arquivo;
 5. reabrir e comparar a semântica esperada.
 
+Há também testes de regressão para as garantias de segurança e integridade:
+recusa de escrita pela caixa de SQL, recusa de nomes de campo inválidos,
+`<PARAMS>` escondido em comentário, campos com os nomes das colunas internas,
+gravação atômica sem rastros e escape de valores. Ao mexer nessas áreas,
+mantenha-os passando em vez de ajustá-los à nova saída.
+
 ## Pontos de atenção
 
 - `document.rs` concentra grande parte da interface tabular; mudanças devem
   preservar o ciclo de vida dos handlers e capturas fracas.
-- O fallback para modo texto atualmente também absorve erros de parsing ou
-  leitura sem expor a causa ao usuário.
 - A exportação CSV consulta toda a tabela, não o filtro ou SQL visível.
+- Nomes de coluna são nomes de atributo XML no arquivo salvo; qualquer caminho
+  novo que crie ou renomeie colunas precisa passar por `check_column_name()`.
+- Toda gravação em disco deve usar `write_atomic()`, nunca `fs::write` ou
+  `File::create` diretamente. A exceção conhecida é `config.rs`, cujo
+  `config.ini` volta ao padrão se corromper.
 - A serialização preserva dados selecionados, não a formatação literal do XML.
 - A sintaxe antiga de `glib::clone!` gera avisos nas versões atuais do crate.
 - O catálogo de tradução retorna texto vazio para chaves ausentes em português;
