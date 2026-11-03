@@ -12,7 +12,8 @@ Este diretório reúne a documentação de uso e desenvolvimento do Lê-XML.
 ## Para desenvolvimento e distribuição
 
 - [Compilação e empacotamento](build-e-empacotamento.md) — dependências,
-  comandos de build, testes e geração do AppImage.
+  comandos de build, testes, geração do AppImage, atualização automática por
+  zsync e integração contínua.
 - [Arquitetura e desenvolvimento](arquitetura.md) — módulos, fluxo de dados,
   persistência e orientações para manutenção.
 
@@ -23,6 +24,7 @@ Este diretório reúne a documentação de uso e desenvolvimento do Lê-XML.
 | Aprender a usar a interface | [Guia de uso](uso.md) |
 | Entender quais XMLs abrem como tabela | [Formato XML](formato-xml.md) |
 | Compilar ou executar pelo código-fonte | [Build](build-e-empacotamento.md) |
+| Publicar uma versão nova | [Build](build-e-empacotamento.md#publicar-uma-versão) |
 | Conhecer a organização interna | [Arquitetura](arquitetura.md) |
 
 Voltar ao [README principal](../README.md).

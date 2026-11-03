@@ -209,19 +209,29 @@ já gera com o nome final em ASCII, idêntico ao das releases anteriores.
 
 ### Publicar uma versão
 
-Os **dois** arquivos precisam ser anexados à release. Sem o `.zsync` publicado,
-a update information embutida não leva a lugar nenhum:
+O caminho normal é por tag — veja [Integração contínua](#integração-contínua).
+Suba a versão no `Cargo.toml`, faça o commit e empurre a tag correspondente:
+
+```bash
+git tag v0.5.4
+git push origin v0.5.4
+```
+
+O workflow compila, roda os testes, gera os dois arquivos e cria a release.
+
+Para publicar à mão, os **dois** arquivos precisam ser anexados. Sem o `.zsync`
+publicado, a update information embutida não leva a lugar nenhum:
 
 ```bash
 gh release create "v$(cargo pkgid | sed 's/.*[#@]//')" \
   --repo rafaelhschuh/LeXML \
+  --latest \
   Le-XML-x86_64.AppImage Le-XML-x86_64.AppImage.zsync
 ```
 
-Como o padrão aponta para `latest`, a release precisa ser publicada como a mais
-recente (não como pré-lançamento) para que os clientes a enxerguem.
-
-> Não há workflow de CI no repositório: a geração e a publicação são manuais.
+O `--latest` não é decorativo: o padrão da update information aponta para
+`latest`, então uma release marcada como pré-lançamento ficaria invisível para
+quem tenta atualizar.
 
 ### Desativar ou redirecionar
 
@@ -232,6 +242,50 @@ fork. Definida como vazia, o AppImage é gerado sem atualização automática e 
 ```bash
 LEXML_UPDATE_INFO= ./packaging/build-appimage.sh
 ```
+
+## Integração contínua
+
+Os workflows ficam em `.github/workflows/`.
+
+### `ci.yml`
+
+Dispara em push na `main`, em pull request e manualmente.
+
+| Job | Bloqueia? | O que faz |
+| --- | --- | --- |
+| `teste` | sim | `cargo test --all-targets` e `cargo build --release` |
+| `qualidade` | não | `cargo fmt --check` e `cargo clippy --all-targets` |
+
+O job de qualidade é informativo de propósito: a árvore tem 62 blocos fora do
+`rustfmt` e 38 avisos do clippy, herdados e em boa parte vindos da sintaxe
+antiga do `glib::clone!`. Reprovar os PRs por esse passivo deixaria o CI
+vermelho desde o primeiro dia. Ao zerá-lo, remova o `continue-on-error` do job.
+
+A imagem é `ubuntu-24.04` fixa, não `ubuntu-latest`: o crate exige as APIs do
+GTK 4.12 e a 22.04 traz apenas a 4.6. Trocar de imagem deve ser uma decisão
+consciente.
+
+### `release.yml`
+
+Dispara em tags `v*` e manualmente.
+
+1. roda os testes — a tag é imutável e os usuários atualizam sozinhos pelo
+   zsync, então publicar um binário quebrado é pior do que não publicar;
+2. confere que a tag corresponde à versão do `Cargo.toml`;
+3. gera o AppImage e o `.zsync`;
+4. valida os artefatos: lê a update information da seção `.upd_info` com
+   `objcopy` e confere que o cabeçalho `URL:` do `.zsync` cita exatamente o
+   nome que o GitHub guardará como anexo;
+5. publica a release com `--latest`.
+
+Executado manualmente pela aba **Actions**, com a opção *Publicar* desmarcada,
+ele percorre todo o empacotamento sem criar release nenhuma e deixa os
+artefatos para download na própria execução. É a forma de testar mudanças no
+`build-appimage.sh` sem queimar uma tag.
+
+A leitura da update information usa `objcopy` em vez de executar o AppImage
+porque o runner não tem FUSE, e `APPIMAGE_EXTRACT_AND_RUN` faria o AppImage
+abrir a janela GTK em vez de imprimir a informação.
 
 ## Variáveis de ambiente
 
