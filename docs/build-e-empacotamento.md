@@ -134,11 +134,15 @@ Execute a partir da raiz:
 ./packaging/build-appimage.sh
 ```
 
-O resultado esperado é:
+O resultado esperado são dois arquivos:
 
 ```text
-Lê-XML-x86_64.AppImage
+Le-XML-x86_64.AppImage
+Le-XML-x86_64.AppImage.zsync
 ```
+
+O nome é escrito sem acento de propósito — veja
+[Atualização automática](#atualização-automática).
 
 Na primeira execução, o script baixa para `.appimage-tools/`:
 
@@ -155,7 +159,7 @@ Depois ele:
 5. empacota temas de ícone necessários;
 6. configura os backends Wayland/X11 e o carregador SVG;
 7. restaura binários afetados pelo `patchelf` em sistemas recentes;
-8. gera o AppImage.
+8. gera o AppImage com a update information embutida e o `.zsync` ao lado.
 
 ### Características do AppImage atual
 
@@ -172,6 +176,63 @@ dentro dele.
 Para distribuição ampla entre versões diferentes de Linux, um pacote Flatpak
 seria mais apropriado; ele ainda não faz parte do repositório.
 
+## Atualização automática
+
+O AppImage carrega uma *update information* na seção `.upd_info` do binário,
+que diz ao [AppImageUpdate](https://github.com/AppImage/AppImageUpdate) e ao
+AppImageLauncher onde procurar uma versão nova:
+
+```text
+gh-releases-zsync|rafaelhschuh|LeXML|latest|Le-XML-x86_64.AppImage.zsync
+```
+
+Com ela, quem já tem o AppImage atualiza sem baixar os 40 MB de novo — o zsync
+compara blocos e transfere apenas o que mudou:
+
+```bash
+AppImageUpdate Le-XML-x86_64.AppImage
+```
+
+No AppImageLauncher, o mesmo está no item **Update** do menu de contexto do
+aplicativo.
+
+### O nome do arquivo não pode ter acento
+
+O GitHub renomeia anexos de release que tenham caracteres especiais, por um
+algoritmo que ele não documenta. Nas releases v0.5.1 a v0.5.3, o arquivo local
+`Lê-XML-x86_64.AppImage` foi guardado como `Le-XML-x86_64.AppImage`.
+
+Isso quebraria a atualização de duas maneiras: o padrão da update information
+não casaria com o nome guardado, e o cabeçalho `URL:` gravado dentro do
+`.zsync` apontaria para um arquivo inexistente no servidor. Por isso o script
+já gera com o nome final em ASCII, idêntico ao das releases anteriores.
+
+### Publicar uma versão
+
+Os **dois** arquivos precisam ser anexados à release. Sem o `.zsync` publicado,
+a update information embutida não leva a lugar nenhum:
+
+```bash
+gh release create "v$(cargo pkgid | sed 's/.*[#@]//')" \
+  --repo rafaelhschuh/LeXML \
+  Le-XML-x86_64.AppImage Le-XML-x86_64.AppImage.zsync
+```
+
+Como o padrão aponta para `latest`, a release precisa ser publicada como a mais
+recente (não como pré-lançamento) para que os clientes a enxerguem.
+
+> Não há workflow de CI no repositório: a geração e a publicação são manuais.
+
+### Desativar ou redirecionar
+
+A variável `LEXML_UPDATE_INFO` substitui a update information — útil em um
+fork. Definida como vazia, o AppImage é gerado sem atualização automática e sem
+`.zsync`:
+
+```bash
+LEXML_UPDATE_INFO= ./packaging/build-appimage.sh
+```
+
 ## Variáveis de ambiente
 
 ### `LEXML_THEME`
@@ -180,7 +241,7 @@ Substitui a preferência salva:
 
 ```bash
 LEXML_THEME=dark cargo run
-LEXML_THEME=light ./Lê-XML-x86_64.AppImage
+LEXML_THEME=light ./Le-XML-x86_64.AppImage
 LEXML_THEME=system ./target/release/lexml-gtk
 ```
 
@@ -198,7 +259,7 @@ Valores reconhecidos:
 `wayland,x11`:
 
 ```bash
-LEXML_GDK_BACKEND=x11 ./Lê-XML-x86_64.AppImage
+LEXML_GDK_BACKEND=x11 ./Le-XML-x86_64.AppImage
 ```
 
 ## Integração com o desktop

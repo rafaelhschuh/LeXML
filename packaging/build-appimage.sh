@@ -11,6 +11,26 @@ BIN="lexml-gtk"
 TOOLS="$HERE/.appimage-tools"
 mkdir -p "$TOOLS"
 
+# Versão: o Cargo.toml é a fonte única.
+VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+[ -n "$VERSION" ] || { echo "!! não consegui ler a versão do Cargo.toml" >&2; exit 1; }
+
+# Nome do artefato, em ASCII de propósito. O GitHub renomeia anexos de release
+# que tenham caracteres especiais: nas releases v0.5.1 a v0.5.3, o arquivo local
+# "Lê-XML-x86_64.AppImage" virou "Le-XML-x86_64.AppImage" no servidor. Isso
+# quebraria a atualização de duas formas — o padrão abaixo não casaria com o
+# nome guardado, e o cabeçalho "URL:" gravado dentro do .zsync apontaria para um
+# arquivo que não existe lá. Geramos já com o nome final, que é também o mesmo
+# das releases anteriores.
+OUT="Le-XML-x86_64.AppImage"
+
+# Update information: é o que o AppImageUpdate e o AppImageLauncher leem de
+# dentro do AppImage para saber onde procurar uma versão nova. Sem isso, o
+# usuário precisa baixar o arquivo de novo à mão a cada release.
+#   gh-releases-zsync|<usuário>|<repositório>|<release>|<padrão do .zsync>
+# Sobrescreva com LEXML_UPDATE_INFO (útil em forks); defina vazio para desligar.
+UPDATE_INFO="${LEXML_UPDATE_INFO-gh-releases-zsync|rafaelhschuh|LeXML|latest|Le-XML-x86_64.AppImage.zsync}"
+
 LD="$TOOLS/linuxdeploy-x86_64.AppImage"
 LDGTK="$TOOLS/linuxdeploy-plugin-gtk.sh"
 
@@ -178,7 +198,40 @@ done < <(find "$APPDIR/usr/lib" -name '*.so*' -print0)
 
 # Fase 3: empacotar o AppDir já limpo com appimagetool (apenas compacta, NÃO
 # re-analisa dependências — por isso não recopia as libs removidas acima).
-ARCH=x86_64 "$AIT" "$APPDIR" "Lê-XML-x86_64.AppImage"
+# Com -u, o appimagetool grava a update information na seção .upd_info do
+# binário e gera o .zsync ao lado — o zsyncmake vem dentro do próprio
+# appimagetool, cujo AppRun o coloca no PATH.
+rm -f "$OUT" "$OUT.zsync"
+if [ -n "$UPDATE_INFO" ]; then
+  ARCH=x86_64 VERSION="$VERSION" "$AIT" -u "$UPDATE_INFO" "$APPDIR" "$OUT"
+else
+  echo ">> LEXML_UPDATE_INFO vazio: gerando sem atualização automática."
+  ARCH=x86_64 VERSION="$VERSION" "$AIT" "$APPDIR" "$OUT"
+fi
 
-echo ">> Pronto. AppImage gerado na raiz do projeto."
-ls -1 *.AppImage
+# O .zsync é metade do mecanismo: sem ele publicado ao lado do AppImage, a
+# update information embutida não leva a lugar nenhum. Falhar aqui é melhor do
+# que entregar um AppImage que se diz atualizável e não é.
+if [ -n "$UPDATE_INFO" ] && [ ! -f "$OUT.zsync" ]; then
+  echo "!! $OUT.zsync não foi gerado — a atualização automática não funcionaria." >&2
+  exit 1
+fi
+
+echo ">> Pronto. Artefatos na raiz do projeto:"
+ls -1sh "$OUT" ${UPDATE_INFO:+"$OUT.zsync"}
+
+if [ -n "$UPDATE_INFO" ]; then
+  cat <<FIM
+
+Para a atualização automática funcionar, publique OS DOIS arquivos como anexos
+da release "$VERSION" em https://github.com/rafaelhschuh/LeXML/releases :
+
+  $OUT
+  $OUT.zsync
+
+Com eles no lugar, quem já tem o AppImage atualiza sem rebaixar nada:
+
+  AppImageUpdate $OUT          # baixa só os blocos que mudaram
+  (ou o item "Update" do AppImageLauncher, no menu do aplicativo)
+FIM
+fi
