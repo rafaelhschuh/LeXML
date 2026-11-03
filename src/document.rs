@@ -1,4 +1,4 @@
-use crate::xmldoc::{XmlDoc, QueryResult};
+use crate::xmldoc::{Change, XmlDoc, QueryResult};
 use crate::row_object::RowObject;
 use crate::dialog;
 use crate::i18n::tr;
@@ -35,6 +35,8 @@ pub struct DocumentView {
     colview: gtk::ColumnView,
     status: gtk::Label,
     find_entry: gtk::SearchEntry,
+    undo_btn: gtk::Button,
+    redo_btn: gtk::Button,
     menu: gtk::PopoverMenu,
     ctx_rowid: Cell<i64>,
     ctx_col: Cell<usize>,
@@ -70,6 +72,16 @@ impl DocumentView {
             .margin_start(6)
             .margin_end(6)
             .build();
+
+        let undo_btn = gtk::Button::from_icon_name("edit-undo-symbolic");
+        undo_btn.set_tooltip_text(Some(tr("undo_tooltip")));
+        undo_btn.set_sensitive(false);
+        bar.append(&undo_btn);
+
+        let redo_btn = gtk::Button::from_icon_name("edit-redo-symbolic");
+        redo_btn.set_tooltip_text(Some(tr("redo_tooltip")));
+        redo_btn.set_sensitive(false);
+        bar.append(&redo_btn);
 
         let find_entry = gtk::SearchEntry::builder()
             .placeholder_text(tr("find_placeholder"))
@@ -185,6 +197,8 @@ impl DocumentView {
             colview,
             status,
             find_entry: find_entry.clone(),
+            undo_btn: undo_btn.clone(),
+            redo_btn: redo_btn.clone(),
             menu,
             ctx_rowid: Cell::new(-1),
             ctx_col: Cell::new(0),
@@ -220,13 +234,28 @@ impl DocumentView {
         me.arm_filter_autocomplete(&filter_entry);
 
         // Ctrl+S salva (sobrescreve o arquivo atual); Ctrl+Shift+S abre "Salvar como".
+        // Ctrl+Z desfaz; Ctrl+Shift+Z e Ctrl+Y refazem.
         let save_keys = gtk::EventControllerKey::new();
         save_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let me_keys = me.clone();
         save_keys.connect_key_pressed(move |_, keyval, _code, state| {
-            if state.contains(gdk::ModifierType::CONTROL_MASK)
-                && matches!(keyval, gdk::Key::s | gdk::Key::S)
-            {
+            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+            let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+            let undo = ctrl && !shift && matches!(keyval, gdk::Key::z | gdk::Key::Z);
+            let redo = ctrl
+                && (matches!(keyval, gdk::Key::y | gdk::Key::Y)
+                    || (shift && matches!(keyval, gdk::Key::z | gdk::Key::Z)));
+            // Num campo de texto (célula em edição, filtro, localizar) o atalho
+            // fica com o próprio campo, que tem seu desfazer de texto.
+            if (undo || redo) && !me_keys.text_has_focus() {
+                if undo {
+                    me_keys.do_undo();
+                } else {
+                    me_keys.do_redo();
+                }
+                return glib::Propagation::Stop;
+            }
+            if ctrl && matches!(keyval, gdk::Key::s | gdk::Key::S) {
                 if state.contains(gdk::ModifierType::SHIFT_MASK) {
                     me_keys.save_as(|_ok| {});
                 } else {
@@ -238,6 +267,8 @@ impl DocumentView {
         });
         me.root.add_controller(save_keys);
 
+        undo_btn.connect_clicked(clone!(@strong me => move |_| me.do_undo()));
+        redo_btn.connect_clicked(clone!(@strong me => move |_| me.do_redo()));
         sql_btn.connect_clicked(clone!(@strong me => move |_| me.open_sql_dialog()));
         sum_btn.connect_clicked(clone!(@strong me => move |_| me.do_sum()));
         save_btn.connect_clicked(clone!(@strong me => move |_| me.do_save()));
@@ -296,6 +327,7 @@ impl DocumentView {
                 };
                 self.status.set_text(&format!("Total: {n}{extra}"));
                 self.load_result_chunked(res, true, None);
+                self.refresh_history_buttons();
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("filter_error"))),
         }
@@ -474,6 +506,7 @@ impl DocumentView {
                 self.status
                     .set_text(&format!("Total: {n}  ·  SQL (somente leitura): {sql}"));
                 self.load_result_chunked(res, false, None);
+                self.refresh_history_buttons();
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("sql_error"))),
         }
@@ -780,7 +813,7 @@ impl DocumentView {
                         if let Err(e) = me2.state.dp.update_cell(row.rowid(), &col_name, &new_val) {
                             me2.error(&format!("{}\n{e}", tr("cell_write_error")));
                         } else {
-                            *me2.state.dirty.borrow_mut() = true;
+                            me2.mark_dirty();
                         }
                     }
                 });
@@ -841,8 +874,8 @@ impl DocumentView {
             }
             match me.state.dp.rename_column(&old, &new) {
                 Ok(()) => {
-                    *me.state.dirty.borrow_mut() = true;
-                    me.reload();
+                    me.mark_dirty();
+                    me.show_change(Change::ColumnRenamed { from: old.clone(), to: new.trim().to_string() });
                 }
                 Err(err) => me.error(&format!("{}\n{err}", tr("column_op_error"))),
             }
@@ -1074,10 +1107,166 @@ impl DocumentView {
         dialog::error(self.window().as_ref(), body);
     }
 
-    /// Recarrega a visão atual (mantendo o último filtro) após mudança estrutural.
-    fn reload(self: &Rc<Self>) {
-        let where_clause = self.state.last_filter.borrow().clone();
-        self.apply_filter(&where_clause);
+    /// Marca o documento como alterado e atualiza os botões de desfazer/refazer.
+    fn mark_dirty(&self) {
+        *self.state.dirty.borrow_mut() = true;
+        self.refresh_history_buttons();
+    }
+
+    /// Desfazer/refazer só valem na visão editável: o resultado de uma
+    /// consulta SQL livre não corresponde às linhas da tabela.
+    fn refresh_history_buttons(&self) {
+        let editable = *self.state.editable.borrow();
+        self.undo_btn.set_sensitive(editable && self.state.dp.can_undo());
+        self.redo_btn.set_sensitive(editable && self.state.dp.can_redo());
+    }
+
+    /// `true` se o foco está num campo de texto (célula em edição, filtro,
+    /// localizar), que tem seu próprio desfazer.
+    fn text_has_focus(&self) -> bool {
+        self.window()
+            .and_then(|w| GtkWindowExt::focus(&w))
+            .is_some_and(|f| f.is::<gtk::Text>())
+    }
+
+    fn do_undo(self: &Rc<Self>) {
+        self.history_step(false);
+    }
+
+    fn do_redo(self: &Rc<Self>) {
+        self.history_step(true);
+    }
+
+    fn history_step(self: &Rc<Self>, forward: bool) {
+        if !*self.state.editable.borrow() || self.state.loading.get() {
+            return;
+        }
+        self.commit_pending_edit();
+        let res = if forward { self.state.dp.redo() } else { self.state.dp.undo() };
+        match res {
+            Ok(None) => {}
+            Ok(Some(change)) => {
+                self.mark_dirty();
+                self.show_change(change);
+            }
+            Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
+        }
+    }
+
+    /// Reflete na grade o que o desfazer/refazer mudou, mexendo só nas linhas
+    /// e colunas afetadas — sem recarregar a tabela.
+    fn show_change(self: &Rc<Self>, change: Change) {
+        match change {
+            Change::Cell { rowid, column, value } => {
+                let col = self.state.columns.borrow().iter().position(|c| *c == column);
+                let (Some(col), Some(pos)) = (col, self.row_position(rowid)) else {
+                    return; // linha ou coluna fora da visão atual
+                };
+                if let Some(obj) = self.store.item(pos) {
+                    obj.downcast::<RowObject>().unwrap().set_value(col, value);
+                    // força o rebind da linha para a célula mostrar o valor
+                    self.store.items_changed(pos, 1, 1);
+                }
+                self.select_rowid(rowid);
+            }
+            Change::RowAdded { rowid } => self.show_row_added(rowid),
+            Change::RowRemoved { rowid } => {
+                if let Some(pos) = self.row_position(rowid) {
+                    self.store.remove(pos);
+                    self.refresh_status();
+                }
+            }
+            Change::RowsSwapped { a, b } => {
+                // Se uma das duas está fora do filtro, a ordem visível não muda.
+                let (Some(pa), Some(pb)) = (self.row_position(a), self.row_position(b)) else {
+                    return;
+                };
+                let (lo, hi) = (pa.min(pb), pa.max(pb));
+                let (Some(o_lo), Some(o_hi)) = (self.store.item(lo), self.store.item(hi)) else {
+                    return;
+                };
+                self.store.splice(hi, 1, &[o_lo]);
+                self.store.splice(lo, 1, &[o_hi]);
+                self.select_rowid(a);
+            }
+            Change::ColumnAdded { index, name, values } => {
+                let cnt = self.store.n_items();
+                for i in 0..cnt {
+                    if let Some(obj) = self.store.item(i) {
+                        let row = obj.downcast::<RowObject>().unwrap();
+                        let v = values.get(&row.rowid()).cloned().unwrap_or_default();
+                        row.insert_value(index, v);
+                    }
+                }
+                {
+                    let mut cols = self.state.columns.borrow_mut();
+                    let at = index.min(cols.len());
+                    cols.insert(at, name);
+                }
+                let names = self.state.columns.borrow().clone();
+                self.rebuild_columns(&names);
+            }
+            Change::ColumnRemoved { name } => {
+                let col = self.state.columns.borrow().iter().position(|c| *c == name);
+                let Some(col) = col else { return };
+                let cnt = self.store.n_items();
+                for i in 0..cnt {
+                    if let Some(obj) = self.store.item(i) {
+                        obj.downcast::<RowObject>().unwrap().remove_value(col);
+                    }
+                }
+                self.state.columns.borrow_mut().remove(col);
+                let names = self.state.columns.borrow().clone();
+                self.rebuild_columns(&names);
+            }
+            Change::ColumnRenamed { from, to } => {
+                if let Some(c) = self.state.columns.borrow_mut().iter_mut().find(|c| **c == from) {
+                    *c = to;
+                }
+                let names = self.state.columns.borrow().clone();
+                self.rebuild_columns(&names);
+            }
+        }
+    }
+
+    /// Recoloca na grade uma linha restaurada, na posição que ela ocupa na
+    /// ordem do documento — se ela passar pelo filtro atual.
+    fn show_row_added(self: &Rc<Self>, rowid: i64) {
+        let filter = self.state.last_filter.borrow().clone();
+        let values = match self.state.dp.visible_row(rowid, &filter) {
+            Ok(Some(v)) => v,
+            Ok(None) => return, // fora do filtro
+            Err(e) => {
+                self.error(&format!("{}\n{e}", tr("error")));
+                return;
+            }
+        };
+        // posição de cada linha visível, para achar a próxima vizinha
+        let mut pos_of = std::collections::HashMap::new();
+        for i in 0..self.store.n_items() {
+            if let Some(obj) = self.store.item(i) {
+                pos_of.insert(obj.downcast::<RowObject>().unwrap().rowid(), i);
+            }
+        }
+        let at = match self.state.dp.next_row_where(rowid, |id| pos_of.contains_key(&id)) {
+            Ok(Some(next)) => pos_of[&next],
+            Ok(None) => self.store.n_items(),
+            Err(e) => {
+                self.error(&format!("{}\n{e}", tr("error")));
+                return;
+            }
+        };
+        self.store.insert(at, &RowObject::new(rowid, values, true));
+        self.refresh_status();
+        self.select_rowid(rowid);
+    }
+
+    /// Seleciona e rola até a linha `rowid`, se ela estiver na visão.
+    fn select_rowid(&self, rowid: i64) {
+        if let Some(pos) = self.row_position(rowid) {
+            self.selection.set_selected(pos);
+            self.colview.scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
+        }
     }
 
     /// Localiza a posição de um `rowid` dentro do store (varredura linear barata).
@@ -1117,7 +1306,7 @@ impl DocumentView {
         }
         match self.state.dp.insert_row_relative(rid, above) {
             Ok(new_rid) => {
-                *self.state.dirty.borrow_mut() = true;
+                self.mark_dirty();
                 // insere apenas a nova linha no store (sem re-consultar 50k linhas)
                 let ncol = self.state.columns.borrow().len();
                 let obj = RowObject::new(new_rid, vec![String::new(); ncol], true);
@@ -1142,7 +1331,7 @@ impl DocumentView {
         }
         match self.state.dp.delete_row(rid) {
             Ok(()) => {
-                *self.state.dirty.borrow_mut() = true;
+                self.mark_dirty();
                 // remove apenas a linha do store (sem re-consultar)
                 if let Some(pos) = self.row_position(rid) {
                     self.store.remove(pos);
@@ -1163,7 +1352,7 @@ impl DocumentView {
         }
         match self.state.dp.clone_row(rid, above) {
             Ok((new_rid, values)) => {
-                *self.state.dirty.borrow_mut() = true;
+                self.mark_dirty();
                 let obj = RowObject::new(new_rid, values, true);
                 let pos = self.row_position(rid).unwrap_or(self.store.n_items());
                 let at = if above { pos } else { pos + 1 };
@@ -1186,7 +1375,7 @@ impl DocumentView {
         }
         match self.state.dp.move_row(rid, up) {
             Ok(Some(_)) => {
-                *self.state.dirty.borrow_mut() = true;
+                self.mark_dirty();
                 let Some(pos) = self.row_position(rid) else {
                     return;
                 };
@@ -1219,7 +1408,7 @@ impl DocumentView {
         }
         match self.state.dp.add_column(&name) {
             Ok(()) => {
-                *self.state.dirty.borrow_mut() = true;
+                self.mark_dirty();
                 // acrescenta um valor vazio em cada RowObject já carregado (sem re-query)
                 let cnt = self.store.n_items();
                 for i in 0..cnt {
@@ -1244,7 +1433,7 @@ impl DocumentView {
         let Some(name) = name else { return };
         match self.state.dp.drop_column(&name) {
             Ok(()) => {
-                *self.state.dirty.borrow_mut() = true;
+                self.mark_dirty();
                 // remove o valor da coluna em cada RowObject já carregado (sem re-query)
                 let cnt = self.store.n_items();
                 for i in 0..cnt {

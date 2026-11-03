@@ -4,6 +4,7 @@ use quick_xml::reader::Reader;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -14,9 +15,66 @@ use std::path::Path;
 const HEADER_SCAN_BYTES: u64 = 1 << 20;
 
 /// Um <FIELD> do METADATA, com todos os atributos crus preservados para reescrita fiel.
+#[derive(Clone)]
 pub struct Field {
     pub name: String,
     pub attrs: Vec<(String, String)>,
+}
+
+/// Quantas operações o histórico de desfazer guarda. As mais antigas são
+/// descartadas — excluir uma coluna de uma tabela grande guarda todos os seus
+/// valores, então o limite também segura o consumo de memória.
+const HISTORY_LIMIT: usize = 500;
+
+/// Uma linha completa, guardada para desfazer uma exclusão ou refazer uma
+/// inclusão com o mesmo rowid e a mesma posição.
+struct RowSnap {
+    rowid: i64,
+    ord: f64,
+    values: Vec<(String, String)>,
+}
+
+/// Uma coluna completa (posição, atributos do FIELD e valores não vazios).
+struct ColSnap {
+    index: usize,
+    field: Field,
+    values: Vec<(i64, String)>,
+}
+
+/// Uma alteração registrada no histórico. Cada variante sabe se aplicar nos
+/// dois sentidos: para frente (refazer) e para trás (desfazer).
+enum Op {
+    Cell { rowid: i64, col: String, old: String, new: String },
+    InsertRow(RowSnap),
+    DeleteRow(RowSnap),
+    /// Troca de posição entre duas linhas — é a própria inversa.
+    SwapRows(i64, i64),
+    AddColumn(ColSnap),
+    DropColumn(ColSnap),
+    RenameColumn { old: String, new: String },
+}
+
+#[derive(Default)]
+struct History {
+    undo: Vec<Op>,
+    redo: Vec<Op>,
+}
+
+/// O que mudou ao desfazer/refazer, para a interface atualizar só o trecho
+/// afetado da grade, sem recarregar a tabela inteira.
+pub enum Change {
+    /// Uma célula mudou de valor.
+    Cell { rowid: i64, column: String, value: String },
+    /// Uma linha voltou a existir (na posição de ordem que tinha).
+    RowAdded { rowid: i64 },
+    /// Uma linha deixou de existir.
+    RowRemoved { rowid: i64 },
+    /// Duas linhas vizinhas trocaram de posição.
+    RowsSwapped { a: i64, b: i64 },
+    /// Uma coluna voltou a existir em `index`, com os valores não vazios.
+    ColumnAdded { index: usize, name: String, values: HashMap<i64, String> },
+    ColumnRemoved { name: String },
+    ColumnRenamed { from: String, to: String },
 }
 
 pub struct XmlDoc {
@@ -36,6 +94,7 @@ pub struct XmlDoc {
     ord_col: String,
     /// Apelido do `rid_col` nos resultados de `filter()`, também livre de colisão.
     rid_alias: String,
+    history: RefCell<History>,
 }
 
 /// Cria um Field padrão (string, largura 40) com o nome dado.
@@ -186,6 +245,7 @@ impl XmlDoc {
             rid_col,
             ord_col,
             rid_alias,
+            history: RefCell::default(),
         })
     }
 
@@ -202,6 +262,7 @@ impl XmlDoc {
             rid_col: "__rid".into(),
             ord_col: "__ord".into(),
             rid_alias: "_rid".into(),
+            history: RefCell::default(),
         })
     }
 
@@ -237,9 +298,13 @@ impl XmlDoc {
         if self.name_taken(name) {
             bail!("já existe uma coluna com esse nome");
         }
-        self.db
-            .execute(&format!("ALTER TABLE dados ADD COLUMN {} TEXT", quote_ident(name)), [])?;
-        self.fields.borrow_mut().push(default_field(name));
+        let snap = ColSnap {
+            index: self.fields.borrow().len(),
+            field: default_field(name),
+            values: Vec::new(),
+        };
+        self.restore_column(&snap)?;
+        self.record(Op::AddColumn(snap));
         Ok(())
     }
 
@@ -253,6 +318,12 @@ impl XmlDoc {
         if self.name_taken(new) {
             bail!("já existe uma coluna com esse nome");
         }
+        self.rename_column_raw(old, new)?;
+        self.record(Op::RenameColumn { old: old.to_string(), new: new.to_string() });
+        Ok(())
+    }
+
+    fn rename_column_raw(&self, old: &str, new: &str) -> Result<()> {
         self.db.execute(
             &format!(
                 "ALTER TABLE dados RENAME COLUMN {} TO {}",
@@ -289,9 +360,72 @@ impl XmlDoc {
         if self.fields.borrow().len() <= 1 {
             bail!("o documento precisa de ao menos uma coluna");
         }
+        let snap = self.column_snap(name)?;
+        self.drop_column_raw(name)?;
+        self.record(Op::DropColumn(snap));
+        Ok(())
+    }
+
+    fn drop_column_raw(&self, name: &str) -> Result<()> {
         self.db
             .execute(&format!("ALTER TABLE dados DROP COLUMN {}", quote_ident(name)), [])?;
         self.fields.borrow_mut().retain(|f| f.name != name);
+        Ok(())
+    }
+
+    /// Fotografa uma coluna antes de excluí-la.
+    fn column_snap(&self, name: &str) -> Result<ColSnap> {
+        let (index, field) = {
+            let fields = self.fields.borrow();
+            let index = fields
+                .iter()
+                .position(|f| f.name == name)
+                .ok_or_else(|| anyhow!("coluna inexistente: {name:?}"))?;
+            (index, fields[index].clone())
+        };
+        let col = quote_ident(name);
+        let mut stmt = self.db.prepare(&format!(
+            "SELECT {}, {col} FROM dados WHERE {col} IS NOT NULL AND {col} <> ''",
+            self.q_rid()
+        ))?;
+        let values = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, value_to_string(&r.get(1)?))))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ColSnap { index, field, values })
+    }
+
+    /// Recria uma coluna na posição e com os valores da fotografia.
+    fn restore_column(&self, snap: &ColSnap) -> Result<()> {
+        let name = &snap.field.name;
+        self.db
+            .execute(&format!("ALTER TABLE dados ADD COLUMN {} TEXT", quote_ident(name)), [])?;
+        {
+            let mut fields = self.fields.borrow_mut();
+            let at = snap.index.min(fields.len());
+            fields.insert(at, snap.field.clone());
+        }
+        if !snap.values.is_empty() {
+            // Uma transação acelera a carga; dentro de desfazer/refazer já há
+            // uma aberta, e o SQLite não aceita transações aninhadas.
+            let tx = if self.db.is_autocommit() {
+                Some(self.db.unchecked_transaction()?)
+            } else {
+                None
+            };
+            {
+                let mut stmt = self.db.prepare(&format!(
+                    "UPDATE dados SET {} = ?1 WHERE {} = ?2",
+                    quote_ident(name),
+                    self.q_rid()
+                ))?;
+                for (rowid, v) in &snap.values {
+                    stmt.execute(rusqlite::params![v, rowid])?;
+                }
+            }
+            if let Some(tx) = tx {
+                tx.commit()?;
+            }
+        }
         Ok(())
     }
 
@@ -310,7 +444,13 @@ impl XmlDoc {
             &format!("INSERT INTO dados ({}) VALUES ({})", cols.join(", "), ph.join(", ")),
             rusqlite::params_from_iter(vals),
         )?;
-        Ok(self.db.last_insert_rowid())
+        let rowid = self.db.last_insert_rowid();
+        self.record(Op::InsertRow(RowSnap {
+            rowid,
+            ord,
+            values: names.into_iter().map(|n| (n, String::new())).collect(),
+        }));
+        Ok(rowid)
     }
 
     /// Insere uma linha em branco no final. Retorna o rowid criado.
@@ -338,9 +478,48 @@ impl XmlDoc {
 
     /// Exclui a linha de `rowid`.
     pub fn delete_row(&self, rowid: i64) -> Result<()> {
+        let snap = self.row_snap(rowid)?;
+        self.delete_row_raw(rowid)?;
+        self.record(Op::DeleteRow(snap));
+        Ok(())
+    }
+
+    fn delete_row_raw(&self, rowid: i64) -> Result<()> {
         self.db.execute(
             &format!("DELETE FROM dados WHERE {} = ?1", self.q_rid()),
             [rowid],
+        )?;
+        Ok(())
+    }
+
+    /// Fotografa uma linha (rowid, posição e valores) antes de excluí-la.
+    fn row_snap(&self, rowid: i64) -> Result<RowSnap> {
+        let names = self.field_names();
+        let mut sel = vec![self.q_ord()];
+        sel.extend(names.iter().map(|n| quote_ident(n)));
+        let sql = format!("SELECT {} FROM dados WHERE {} = ?1", sel.join(", "), self.q_rid());
+        Ok(self.db.query_row(&sql, [rowid], |r| {
+            let ord: f64 = r.get(0)?;
+            let mut values = Vec::with_capacity(names.len());
+            for (i, n) in names.iter().enumerate() {
+                values.push((n.clone(), value_to_string(&r.get(i + 1)?)));
+            }
+            Ok(RowSnap { rowid, ord, values })
+        })?)
+    }
+
+    /// Reinsere uma linha fotografada, com o mesmo rowid e a mesma posição.
+    fn restore_row(&self, snap: &RowSnap) -> Result<()> {
+        let mut cols = vec![self.q_rid(), self.q_ord()];
+        let mut params = vec![Value::Integer(snap.rowid), Value::Real(snap.ord)];
+        for (n, v) in &snap.values {
+            cols.push(quote_ident(n));
+            params.push(Value::Text(v.clone()));
+        }
+        let ph: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+        self.db.execute(
+            &format!("INSERT INTO dados ({}) VALUES ({})", cols.join(", "), ph.join(", ")),
+            rusqlite::params_from_iter(params),
         )?;
         Ok(())
     }
@@ -404,7 +583,13 @@ impl XmlDoc {
             ),
             rusqlite::params_from_iter(params),
         )?;
-        Ok((self.db.last_insert_rowid(), vals))
+        let rowid = self.db.last_insert_rowid();
+        self.record(Op::InsertRow(RowSnap {
+            rowid,
+            ord: new_ord,
+            values: names.into_iter().zip(vals.iter().cloned()).collect(),
+        }));
+        Ok((rowid, vals))
     }
 
     /// Move a linha `rowid` uma posição para cima (ou para baixo), trocando a
@@ -422,14 +607,21 @@ impl XmlDoc {
             .db
             .query_row(&neighbor_sql, [ord_v], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
-        let Some((nb_rowid, nb_ord)) = neighbor else {
+        let Some((nb_rowid, _)) = neighbor else {
             return Ok(None);
         };
-        // troca os __ord das duas linhas
-        let upd = format!("UPDATE dados SET {ord} = ?1 WHERE {rid} = ?2");
-        self.db.execute(&upd, rusqlite::params![nb_ord, rowid])?;
-        self.db.execute(&upd, rusqlite::params![ord_v, nb_rowid])?;
+        self.swap_rows(rowid, nb_rowid)?;
+        self.record(Op::SwapRows(rowid, nb_rowid));
         Ok(Some(nb_rowid))
+    }
+
+    /// Troca os `__ord` de duas linhas.
+    fn swap_rows(&self, a: i64, b: i64) -> Result<()> {
+        let (ord_a, ord_b) = (self.ord_of(a)?, self.ord_of(b)?);
+        let upd = format!("UPDATE dados SET {} = ?1 WHERE {} = ?2", self.q_ord(), self.q_rid());
+        self.db.execute(&upd, rusqlite::params![ord_b, a])?;
+        self.db.execute(&upd, rusqlite::params![ord_a, b])?;
+        Ok(())
     }
 
     pub fn row_count(&self) -> i64 {
@@ -498,6 +690,26 @@ impl XmlDoc {
     }
 
     pub fn update_cell(&self, rowid: i64, column: &str, value: &str) -> Result<()> {
+        let old: Value = self.db.query_row(
+            &format!("SELECT {} FROM dados WHERE {} = ?1", quote_ident(column), self.q_rid()),
+            [rowid],
+            |r| r.get(0),
+        )?;
+        let old = value_to_string(&old);
+        if old == value {
+            return Ok(());
+        }
+        self.update_cell_raw(rowid, column, value)?;
+        self.record(Op::Cell {
+            rowid,
+            col: column.to_string(),
+            old,
+            new: value.to_string(),
+        });
+        Ok(())
+    }
+
+    fn update_cell_raw(&self, rowid: i64, column: &str, value: &str) -> Result<()> {
         let sql = format!(
             "UPDATE dados SET {} = ?1 WHERE {} = ?2",
             quote_ident(column),
@@ -505,6 +717,138 @@ impl XmlDoc {
         );
         self.db.execute(&sql, rusqlite::params![value, rowid])?;
         Ok(())
+    }
+
+    /// Registra uma alteração já aplicada. Uma alteração nova invalida o que
+    /// havia para refazer.
+    fn record(&self, op: Op) {
+        let mut h = self.history.borrow_mut();
+        h.redo.clear();
+        h.undo.push(op);
+        if h.undo.len() > HISTORY_LIMIT {
+            h.undo.remove(0);
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.history.borrow().undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.history.borrow().redo.is_empty()
+    }
+
+    /// Desfaz a última alteração. `Ok(None)` se não há o que desfazer.
+    pub fn undo(&self) -> Result<Option<Change>> {
+        self.step(false)
+    }
+
+    /// Refaz a última alteração desfeita. `Ok(None)` se não há o que refazer.
+    pub fn redo(&self) -> Result<Option<Change>> {
+        self.step(true)
+    }
+
+    fn step(&self, forward: bool) -> Result<Option<Change>> {
+        let op = {
+            let mut h = self.history.borrow_mut();
+            let from = if forward { &mut h.redo } else { &mut h.undo };
+            match from.pop() {
+                Some(op) => op,
+                None => return Ok(None),
+            }
+        };
+        // Tudo ou nada: uma falha no meio não pode deixar a tabela pela metade.
+        let tx = self.db.unchecked_transaction()?;
+        let applied = self.apply(&op, forward);
+        let mut h = self.history.borrow_mut();
+        match applied {
+            Ok(change) => {
+                tx.commit()?;
+                if forward { h.undo.push(op) } else { h.redo.push(op) }
+                Ok(Some(change))
+            }
+            Err(e) => {
+                drop(tx);
+                // devolve a operação para onde estava
+                if forward { h.redo.push(op) } else { h.undo.push(op) }
+                Err(e)
+            }
+        }
+    }
+
+    /// Aplica `op` para frente (refazer) ou para trás (desfazer), sem registrar.
+    fn apply(&self, op: &Op, forward: bool) -> Result<Change> {
+        Ok(match op {
+            Op::Cell { rowid, col, old, new } => {
+                let value = if forward { new } else { old };
+                self.update_cell_raw(*rowid, col, value)?;
+                Change::Cell { rowid: *rowid, column: col.clone(), value: value.clone() }
+            }
+            Op::InsertRow(s) | Op::DeleteRow(s) => {
+                let insert = forward == matches!(op, Op::InsertRow(_));
+                if insert {
+                    self.restore_row(s)?;
+                    Change::RowAdded { rowid: s.rowid }
+                } else {
+                    self.delete_row_raw(s.rowid)?;
+                    Change::RowRemoved { rowid: s.rowid }
+                }
+            }
+            Op::SwapRows(a, b) => {
+                self.swap_rows(*a, *b)?;
+                Change::RowsSwapped { a: *a, b: *b }
+            }
+            Op::AddColumn(c) | Op::DropColumn(c) => {
+                let add = forward == matches!(op, Op::AddColumn(_));
+                let name = c.field.name.clone();
+                if add {
+                    self.restore_column(c)?;
+                    let index = self.fields.borrow().iter().position(|f| f.name == name);
+                    Change::ColumnAdded {
+                        index: index.unwrap_or(c.index),
+                        name,
+                        values: c.values.iter().cloned().collect(),
+                    }
+                } else {
+                    self.drop_column_raw(&name)?;
+                    Change::ColumnRemoved { name }
+                }
+            }
+            Op::RenameColumn { old, new } => {
+                let (from, to) = if forward { (old, new) } else { (new, old) };
+                self.rename_column_raw(from, to)?;
+                Change::ColumnRenamed { from: from.clone(), to: to.clone() }
+            }
+        })
+    }
+
+    /// Valores da linha `rowid` na ordem de `field_names()`, se ela existir e
+    /// passar pelo filtro `where_clause`.
+    pub fn visible_row(&self, rowid: i64, where_clause: &str) -> Result<Option<Vec<String>>> {
+        let sel: Vec<String> = self.field_names().iter().map(|n| quote_ident(n)).collect();
+        let mut sql = format!("SELECT {} FROM dados WHERE {} = {rowid}", sel.join(", "), self.q_rid());
+        if !where_clause.trim().is_empty() {
+            sql.push_str(&format!(" AND ({where_clause})"));
+        }
+        Ok(self.run_readonly(&sql)?.rows.into_iter().next())
+    }
+
+    /// Primeira linha depois de `rowid`, na ordem do documento, que satisfaz
+    /// `pred`. Serve para achar onde reinserir uma linha numa visão filtrada.
+    pub fn next_row_where(&self, rowid: i64, mut pred: impl FnMut(i64) -> bool) -> Result<Option<i64>> {
+        let ord = self.ord_of(rowid)?;
+        let (rid, ordc) = (self.q_rid(), self.q_ord());
+        let mut stmt = self
+            .db
+            .prepare(&format!("SELECT {rid} FROM dados WHERE {ordc} > ?1 ORDER BY {ordc}"))?;
+        let mut q = stmt.query([ord])?;
+        while let Some(r) = q.next()? {
+            let id: i64 = r.get(0)?;
+            if pred(id) {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
     }
 
     /// Soma valores numéricos de uma coluna. Retorna (total, qtd_numéricos).
@@ -996,6 +1340,94 @@ mod tests {
         let p = tmp_path("lexml_sample.xml");
         std::fs::write(&p, xml).unwrap();
         p
+    }
+
+    /// Conteúdo salvo do documento, para comparar estados antes e depois.
+    fn saved(dp: &XmlDoc) -> String {
+        let out = tmp_path("undo.xml");
+        dp.save(&out).unwrap();
+        let s = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        s
+    }
+
+    fn rid_of(dp: &XmlDoc, id: &str) -> i64 {
+        let r = dp.filter(Some(&format!("id = '{id}'"))).unwrap();
+        r.rows[0][0].parse().unwrap()
+    }
+
+    #[test]
+    fn desfazer_e_refazer_restauram_cada_tipo_de_operacao() {
+        let p = sample_xml();
+        let dp = XmlDoc::open(&p).unwrap();
+        let original = saved(&dp);
+        let (r1, r2) = (rid_of(&dp, "1"), rid_of(&dp, "2"));
+
+        dp.update_cell(r1, "nome", "Alfa").unwrap();
+        dp.insert_row_relative(r1, false).unwrap();
+        dp.clone_row(r2, true).unwrap();
+        dp.move_row(r2, true).unwrap();
+        dp.delete_row(r1).unwrap();
+        dp.add_column("extra").unwrap();
+        dp.rename_column("valor", "preco").unwrap();
+        dp.drop_column("nome").unwrap();
+        let alterado = saved(&dp);
+        assert_ne!(original, alterado);
+
+        let mut passos = 0;
+        while dp.undo().unwrap().is_some() {
+            passos += 1;
+        }
+        assert_eq!(passos, 8);
+        assert_eq!(saved(&dp), original, "desfazer tudo volta ao arquivo original");
+        assert!(!dp.can_undo());
+
+        while dp.redo().unwrap().is_some() {}
+        assert_eq!(saved(&dp), alterado, "refazer tudo reproduz as alterações");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn excluir_coluna_e_desfazer_mantem_posicao_e_atributos() {
+        let p = sample_xml();
+        let dp = XmlDoc::open(&p).unwrap();
+        let original = saved(&dp);
+        dp.drop_column("nome").unwrap();
+        assert_eq!(dp.field_names(), ["id", "valor"]);
+        dp.undo().unwrap();
+        assert_eq!(dp.field_names(), ["id", "nome", "valor"]);
+        assert_eq!(saved(&dp), original);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn linha_restaurada_acha_sua_vizinha_na_visao_filtrada() {
+        let p = sample_xml();
+        let dp = XmlDoc::open(&p).unwrap();
+        let (r1, r2, r3) = (rid_of(&dp, "1"), rid_of(&dp, "2"), rid_of(&dp, "3"));
+        // a próxima linha visível depois da 1, com a 2 fora do filtro, é a 3
+        assert_eq!(dp.next_row_where(r1, |id| id != r2).unwrap(), Some(r3));
+        assert_eq!(dp.next_row_where(r3, |_| true).unwrap(), None);
+        assert_eq!(dp.visible_row(r2, "").unwrap().unwrap(), ["2", "Beta", "4.25"]);
+        assert!(dp.visible_row(r2, "nome = 'Alpha'").unwrap().is_none());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn alteracao_nova_descarta_o_refazer() {
+        let p = sample_xml();
+        let dp = XmlDoc::open(&p).unwrap();
+        let r1 = rid_of(&dp, "1");
+        dp.update_cell(r1, "nome", "X").unwrap();
+        dp.undo().unwrap();
+        assert!(dp.can_redo());
+        dp.update_cell(r1, "nome", "Y").unwrap();
+        assert!(!dp.can_redo());
+        // editar com o mesmo valor não entra no histórico
+        dp.update_cell(r1, "nome", "Y").unwrap();
+        dp.undo().unwrap();
+        assert!(!dp.can_undo());
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

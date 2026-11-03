@@ -63,6 +63,13 @@ impl RowObject {
         self.imp().values.borrow_mut().push(val);
     }
 
+    /// Insere um valor na posição `idx` (usado ao restaurar uma coluna).
+    pub fn insert_value(&self, idx: usize, val: String) {
+        let mut v = self.imp().values.borrow_mut();
+        let at = idx.min(v.len());
+        v.insert(at, val);
+    }
+
     /// Remove o valor de índice `idx` (usado ao excluir uma coluna).
     pub fn remove_value(&self, idx: usize) {
         let mut v = self.imp().values.borrow_mut();

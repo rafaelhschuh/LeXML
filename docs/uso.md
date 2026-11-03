@@ -7,6 +7,7 @@ Este guia descreve o comportamento da versão 0.5.4 do Lê-XML.
 - [Abrir ou criar documentos](#abrir-ou-criar-documentos)
 - [Modos de visualização](#modos-de-visualização)
 - [Trabalhar com a tabela](#trabalhar-com-a-tabela)
+- [Desfazer e refazer](#desfazer-e-refazer)
 - [Localizar valores](#localizar-valores)
 - [Filtrar com SQL WHERE](#filtrar-com-sql-where)
 - [Executar uma consulta SQL](#executar-uma-consulta-sql)
@@ -143,6 +144,26 @@ XML inválido na gravação. A mesma regra vale para **Adicionar coluna**.
 
 Operações de edição e estrutura ficam desabilitadas enquanto uma consulta SQL
 livre está sendo exibida.
+
+## Desfazer e refazer
+
+Use os botões de seta no início da barra de ferramentas ou os atalhos:
+
+- `Ctrl+Z` desfaz a última alteração;
+- `Ctrl+Shift+Z` ou `Ctrl+Y` refaz o que foi desfeito.
+
+O histórico cobre edição de células, inclusão, clonagem, movimentação e
+exclusão de linhas, e inclusão, renomeação e exclusão de colunas. Uma coluna
+excluída volta na mesma posição, com seus atributos e valores.
+
+- O histórico guarda as últimas 500 alterações do documento.
+- Fazer uma alteração nova depois de desfazer descarta o que havia para refazer.
+- Enquanto uma célula, o filtro ou o campo Localizar está em edição, os atalhos
+  desfazem o texto digitado no próprio campo, e não a tabela.
+- Desfazer e refazer ficam indisponíveis enquanto o resultado de uma consulta
+  SQL livre está na tela; aplique o filtro novamente para voltar à visão
+  editável.
+- O histórico não é salvo junto com o arquivo e se perde ao fechar a janela.
 
 ## Localizar valores
 
@@ -321,6 +342,8 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 | --- | --- |
 | Salvar | `Ctrl+S` |
 | Salvar como | `Ctrl+Shift+S` |
+| Desfazer | `Ctrl+Z` |
+| Refazer | `Ctrl+Shift+Z` ou `Ctrl+Y` |
 | Próxima ocorrência em Localizar | `Enter` |
 | Aplicar filtro | `Enter` no campo de filtro |
 | Aceitar sugestão do filtro | `Tab` ou `Enter` |
@@ -341,7 +364,8 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 - Arquivos que não são UTF-8 válido, ou maiores que 64 MiB, abrem somente para
   leitura no modo texto.
 - Nomes de coluna precisam ser nomes válidos de atributo XML.
-- O histórico de desfazer/refazer não é implementado.
+- O histórico de desfazer/refazer guarda as últimas 500 alterações e não
+  sobrevive ao fechamento da janela.
 - O aplicativo não salva automaticamente.
 - Salvar um documento tabular normaliza a formatação do XML; não preserva
   indentação e espaços do arquivo original.

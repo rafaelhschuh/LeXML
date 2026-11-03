@@ -123,6 +123,8 @@ bytes não reconhecidos e corromperia o conteúdo.",
         "text_mode_status" => "Modo texto — XML sem estrutura de tabela",
         "save_as" => "Salvar como…",
         "save_tooltip_text" => "Salvar",
+        "undo_tooltip" => "Desfazer (Ctrl+Z)",
+        "redo_tooltip" => "Refazer (Ctrl+Shift+Z ou Ctrl+Y)",
         _ => "",
     }
 }
@@ -203,6 +205,8 @@ unrecognised bytes and corrupt the content.",
         "text_mode_status" => "Text mode — XML without table structure",
         "save_as" => "Save as…",
         "save_tooltip_text" => "Save",
+        "undo_tooltip" => "Undo (Ctrl+Z)",
+        "redo_tooltip" => "Redo (Ctrl+Shift+Z or Ctrl+Y)",
         _ => pt(key),
     }
 }
