@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Um push novo no mesmo ref cancela a execução anterior: não adianta esperar o
+# resultado de um commit que já foi substituído.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  teste:
+    name: Build e testes
+    # Fixo, não "latest": o crate exige as APIs do GTK 4.12, e a 22.04 traz
+    # apenas a 4.6. Subir de imagem é uma decisão consciente, não um sorteio.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependências do GTK4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libgtk-4-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Versão do GTK encontrada
+        run: pkg-config --modversion gtk4
+
+      - name: Testes
+        run: cargo test --all-targets --verbose
+
+      - name: Build de release
+        run: cargo build --release
+
+  qualidade:
+    name: Formatação e lints (informativo)
+    runs-on: ubuntu-24.04
+    # A árvore tem 62 blocos fora do rustfmt e 38 avisos do clippy, herdados —
+    # principalmente a sintaxe antiga do glib::clone!. Enquanto esse passivo
+    # não for zerado, o job relata sem reprovar o PR; transformá-lo em
+    # bloqueante é trocar `continue-on-error` por nada.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependências do GTK4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libgtk-4-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets

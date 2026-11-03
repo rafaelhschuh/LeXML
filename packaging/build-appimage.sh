@@ -31,6 +31,19 @@ OUT="Le-XML-x86_64.AppImage"
 # Sobrescreva com LEXML_UPDATE_INFO (útil em forks); defina vazio para desligar.
 UPDATE_INFO="${LEXML_UPDATE_INFO-gh-releases-zsync|rafaelhschuh|LeXML|latest|Le-XML-x86_64.AppImage.zsync}"
 
+# As ferramentas abaixo são AppImages e se automontam via FUSE. Runners de CI e
+# contêineres não têm /dev/fuse; nesse caso elas sabem se extrair sozinhas.
+if [ ! -e /dev/fuse ]; then
+  export APPIMAGE_EXTRACT_AND_RUN=1
+fi
+
+# Onde procurar a cópia íntegra de uma biblioteca do sistema. Varia por
+# distribuição: Fedora usa /usr/lib64, Debian/Ubuntu usam o diretório de triplet.
+SYSLIBDIRS=()
+for d in /usr/lib64 /lib64 /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+  [ -d "$d" ] && SYSLIBDIRS+=("$d")
+done
+
 LD="$TOOLS/linuxdeploy-x86_64.AppImage"
 LDGTK="$TOOLS/linuxdeploy-plugin-gtk.sh"
 
@@ -190,11 +203,15 @@ cp -f --remove-destination "target/release/$BIN" "$APPDIR/usr/bin/$BIN"
 # subpastas (gtk-4.0/immodules, gdk-pixbuf loaders, gio modules) — também são
 # patchelf'd e corrompidos. Foi um deles (libim-ibus.so) que segfaultou no
 # gtk_init → g_io_modules_scan_all. Casamos por basename na árvore do sistema.
-while IFS= read -r -d '' lib; do
-  base="$(basename "$lib")"
-  src="$(find /usr/lib64 /lib64 -name "$base" 2>/dev/null | head -1)"
-  [ -n "$src" ] && cp -f --remove-destination "$src" "$lib"
-done < <(find "$APPDIR/usr/lib" -name '*.so*' -print0)
+if [ ${#SYSLIBDIRS[@]} -eq 0 ]; then
+  echo "!! nenhum diretório de bibliotecas do sistema reconhecido; pulando." >&2
+else
+  while IFS= read -r -d '' lib; do
+    base="$(basename "$lib")"
+    src="$(find "${SYSLIBDIRS[@]}" -name "$base" 2>/dev/null | head -1)"
+    [ -n "$src" ] && cp -f --remove-destination "$src" "$lib"
+  done < <(find "$APPDIR/usr/lib" -name '*.so*' -print0)
+fi
 
 # Fase 3: empacotar o AppDir já limpo com appimagetool (apenas compacta, NÃO
 # re-analisa dependências — por isso não recopia as libs removidas acima).

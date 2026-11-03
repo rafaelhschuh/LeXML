@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Permite exercitar o empacotamento sem publicar nada.
+  workflow_dispatch:
+    inputs:
+      publicar:
+        description: "Publicar a release (deixe desmarcado para apenas gerar os artefatos)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  appimage:
+    name: AppImage + zsync
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libgtk-4-dev libglib2.0-bin librsvg2-common \
+            libgdk-pixbuf2.0-bin adwaita-icon-theme patchelf desktop-file-utils \
+            file zsync
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Publicar um binário que não passa nos testes seria pior do que não
+      # publicar: a tag é imutável e os usuários atualizam sozinhos via zsync.
+      - name: Testes
+        run: cargo test --all-targets
+
+      - name: A tag confere com o Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cargo_v="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          tag_v="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml: $cargo_v | tag: $tag_v"
+          if [ "$cargo_v" != "$tag_v" ]; then
+            echo "::error::a tag $GITHUB_REF_NAME não corresponde à versão $cargo_v do Cargo.toml"
+            exit 1
+          fi
+
+      - name: Gerar o AppImage
+        env:
+          # Não há /dev/fuse no runner; as ferramentas do AppImage se extraem.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: ./packaging/build-appimage.sh
+
+      - name: Conferir os artefatos
+        run: |
+          set -euo pipefail
+          test -f Le-XML-x86_64.AppImage
+          test -f Le-XML-x86_64.AppImage.zsync
+          echo "--- update information embutida ---"
+          # Lida direto da seção ELF: executar o AppImage exigiria FUSE, que o
+          # runner não tem, e --appimage-extract-and-run abriria a janela GTK.
+          info="$(objcopy -O binary --only-section=.upd_info \
+            Le-XML-x86_64.AppImage /dev/stdout | tr -d '\0')"
+          echo "$info"
+          case "$info" in
+            gh-releases-zsync\|*\|*\|latest\|Le-XML-x86_64.AppImage.zsync) ;;
+            *) echo "::error::update information inesperada: $info"; exit 1 ;;
+          esac
+          echo "--- cabeçalhos do .zsync ---"
+          sed -n '1,/^$/p' Le-XML-x86_64.AppImage.zsync | grep -v '^$'
+          # O cabeçalho URL: precisa citar exatamente o nome que o GitHub
+          # guardará como anexo, senão o cliente baixa de um caminho inexistente.
+          grep -qx 'URL: Le-XML-x86_64.AppImage' Le-XML-x86_64.AppImage.zsync
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Le-XML-x86_64
+          path: |
+            Le-XML-x86_64.AppImage
+            Le-XML-x86_64.AppImage.zsync
+          if-no-files-found: error
+
+      - name: Publicar a release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "::error::publicar exige uma tag; rode o workflow a partir de uma."
+            exit 1
+          fi
+          files=(Le-XML-x86_64.AppImage Le-XML-x86_64.AppImage.zsync)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Reexecução da mesma tag: troca os anexos em vez de falhar.
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            # --latest explícito: a update information aponta para "latest", e
+            # uma release marcada como pré-lançamento ficaria invisível.
+            gh release create "$TAG" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Lê XML $TAG" \
+              --generate-notes \
+              --latest
+          fi
