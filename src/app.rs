@@ -1,7 +1,7 @@
 use crate::document::DocumentView;
 use crate::textdoc::TextDocView;
 use crate::xmldoc::{QueryResult, XmlDoc};
-use crate::{config, dialog, i18n};
+use crate::{config, dialog, i18n, recent};
 use crate::i18n::tr;
 use gtk::glib::clone;
 use gtk::prelude::*;
@@ -107,7 +107,18 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
 
     let open_btn = gtk::Button::from_icon_name("document-open-symbolic");
     open_btn.set_tooltip_text(Some(tr("open_new_window_tooltip")));
-    header.pack_start(&open_btn);
+    // Seta colada ao botão Abrir com a lista de arquivos recentes.
+    let recent_menu = gio::Menu::new();
+    let recent_btn = gtk::MenuButton::builder()
+        .icon_name("pan-down-symbolic")
+        .menu_model(&recent_menu)
+        .tooltip_text(tr("recent_tooltip"))
+        .build();
+    let open_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    open_box.add_css_class("linked");
+    open_box.append(&open_btn);
+    open_box.append(&recent_btn);
+    header.pack_start(&open_box);
 
     let new_btn = gtk::Button::from_icon_name("document-new-symbolic");
     new_btn.set_tooltip_text(Some(tr("new_file_tooltip")));
@@ -126,7 +137,7 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
 
     // pilha: vazio vs documento
     let stack = gtk::Stack::new();
-    let (placeholder, open_center) = build_placeholder();
+    let (placeholder, open_center, recent_box) = build_placeholder();
     stack.add_named(&placeholder, Some("empty"));
     window.set_child(Some(&stack));
 
@@ -135,12 +146,25 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
 
     // Abrir sempre em uma NOVA janela, exceto quando a janela atual ainda está
     // vazia (sem documento) — nesse caso aproveitamos a própria janela.
-    let open_action = {
+    let open_path: Rc<dyn Fn(PathBuf)> = {
         let app = app.clone();
-        let window = window.clone();
+        let window = window.downgrade();
         let stack = stack.clone();
         let current = current.clone();
         let title = title.clone();
+        Rc::new(move |path: PathBuf| {
+            let Some(window) = window.upgrade() else { return };
+            if current.borrow().is_some() {
+                build_window(&app, Initial::Open(path)).present();
+            } else {
+                open_into(&path, &window, &stack, &current, &title);
+            }
+        })
+    };
+
+    let open_action = {
+        let window = window.clone();
+        let open_path = open_path.clone();
         move || {
             let dialog = gtk::FileDialog::builder().title(tr("open_xml_title")).build();
             let filter = gtk::FileFilter::new();
@@ -151,27 +175,68 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
             filters.append(&filter);
             dialog.set_filters(Some(&filters));
 
-            let app = app.clone();
-            let window2 = window.clone();
-            let stack = stack.clone();
-            let current = current.clone();
-            let title = title.clone();
+            let open_path = open_path.clone();
             dialog.open(Some(&window), gio::Cancellable::NONE, move |res| {
-                if let Ok(file) = res {
-                    if let Some(path) = file.path() {
-                        if current.borrow().is_some() {
-                            let w = build_window(&app, Initial::Open(path));
-                            w.present();
-                        } else {
-                            open_into(&path, &window2, &stack, &current, &title);
-                        }
-                    }
+                if let Some(path) = res.ok().and_then(|f| f.path()) {
+                    open_path(path);
                 }
             });
         }
     };
 
     open_btn.connect_clicked(clone!(@strong open_action => move |_| open_action()));
+
+    // Arquivos recentes: tela inicial e menu da seta. A lista é relida quando
+    // a janela ganha o foco ou o menu abre, porque outra janela pode tê-la
+    // alterado.
+    let refresh_recent: Rc<dyn Fn()> = {
+        let recent_box = recent_box.clone();
+        let recent_menu = recent_menu.clone();
+        Rc::new(move || {
+            let list = recent::list();
+            fill_recent_page(&recent_box, &list);
+            fill_recent_menu(&recent_menu, &list);
+        })
+    };
+    refresh_recent();
+    window.connect_is_active_notify(clone!(@strong refresh_recent => move |w| {
+        if w.is_active() {
+            refresh_recent();
+        }
+    }));
+    recent_btn.connect_active_notify(clone!(@strong refresh_recent => move |b| {
+        if b.is_active() {
+            refresh_recent();
+        }
+    }));
+
+    let open_recent = gio::SimpleAction::new("open-recent", Some(glib::VariantTy::STRING));
+    {
+        let open_path = open_path.clone();
+        let refresh_recent = refresh_recent.clone();
+        let window = window.downgrade();
+        open_recent.connect_activate(move |_, param| {
+            let Some(path) = param.and_then(|v| v.get::<String>()).map(PathBuf::from) else {
+                return;
+            };
+            if !path.is_file() {
+                if let Some(w) = window.upgrade() {
+                    dialog::error(Some(w.upcast_ref()), tr("recent_missing"));
+                }
+                refresh_recent();
+                return;
+            }
+            open_path(path);
+        });
+    }
+    window.add_action(&open_recent);
+
+    let clear_recent = gio::SimpleAction::new("clear-recent", None);
+    clear_recent.connect_activate(clone!(@strong refresh_recent => move |_, _| {
+        recent::clear();
+        refresh_recent();
+    }));
+    window.add_action(&clear_recent);
     open_center.connect_clicked(clone!(@strong open_action => move |_| open_action()));
 
     // novo arquivo em branco
@@ -248,7 +313,8 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
 }
 
 /// Página inicial "Nenhum arquivo aberto" (substitui `adw::StatusPage`).
-fn build_placeholder() -> (gtk::Box, gtk::Button) {
+/// Devolve também a caixa onde a lista de recentes é montada.
+fn build_placeholder() -> (gtk::Box, gtk::Button, gtk::Box) {
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -285,7 +351,154 @@ fn build_placeholder() -> (gtk::Box, gtk::Button) {
     open_center.set_margin_top(6);
     page.append(&open_center);
 
-    (page, open_center)
+    let recent_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(24)
+        .width_request(460)
+        .build();
+    page.append(&recent_box);
+
+    (page, open_center, recent_box)
+}
+
+/// Quantos recentes aparecem na tela inicial (o menu mostra todos).
+const RECENT_ON_PAGE: usize = 8;
+
+/// Pasta do arquivo para exibição, com a pasta pessoal abreviada para `~`.
+fn display_dir(path: &Path) -> String {
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let home = glib::home_dir();
+    match dir.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => dir.display().to_string(),
+    }
+}
+
+/// Encurta `s` para no máximo `max` caracteres, trocando o meio por `…` —
+/// o começo e o fim de um caminho são as partes que identificam o arquivo.
+fn shorten_middle(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max || max < 3 {
+        return s.to_string();
+    }
+    let keep = max - 1;
+    let head = keep / 2;
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
+/// Limite, em caracteres, do nome e da pasta nas listas de recentes.
+const RECENT_MAX_CHARS: usize = 60;
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Monta a lista de recentes da tela inicial. Cada linha dispara a ação
+/// `win.open-recent` com o caminho do arquivo.
+fn fill_recent_page(container: &gtk::Box, list: &[PathBuf]) {
+    while let Some(c) = container.first_child() {
+        container.remove(&c);
+    }
+    container.set_visible(!list.is_empty());
+    if list.is_empty() {
+        return;
+    }
+
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let heading = gtk::Label::builder()
+        .label(tr("recent_title"))
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    heading.add_css_class("heading");
+    head.append(&heading);
+    let clear = gtk::Button::builder()
+        .label(tr("clear_recent"))
+        .action_name("win.clear-recent")
+        .build();
+    clear.add_css_class("flat");
+    head.append(&clear);
+    container.append(&head);
+
+    let listbox = gtk::ListBox::new();
+    listbox.set_selection_mode(gtk::SelectionMode::None);
+    listbox.add_css_class("frame");
+    listbox.add_css_class("recent-list");
+    for path in list.iter().take(RECENT_ON_PAGE) {
+        let text = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(8)
+            .margin_bottom(8)
+            .build();
+        // `max_width_chars` limita a largura natural; sem ele o rótulo
+        // reivindica o caminho inteiro e a reticência nunca aparece.
+        let name = gtk::Label::builder()
+            .label(file_name(path))
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(RECENT_MAX_CHARS as i32)
+            .build();
+        let dir = gtk::Label::builder()
+            .label(display_dir(path))
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(RECENT_MAX_CHARS as i32)
+            .build();
+        dir.add_css_class("dim-label");
+        text.append(&name);
+        text.append(&dir);
+
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&text));
+        row.set_tooltip_text(Some(&path.display().to_string()));
+        row.set_action_name(Some("win.open-recent"));
+        row.set_action_target_value(Some(&path.to_string_lossy().to_variant()));
+        listbox.append(&row);
+    }
+    container.append(&listbox);
+}
+
+/// Monta o menu de recentes da seta ao lado do botão Abrir.
+fn fill_recent_menu(menu: &gio::Menu, list: &[PathBuf]) {
+    menu.remove_all();
+    let files = gio::Menu::new();
+    if list.is_empty() {
+        // item sem ação: aparece desabilitado
+        files.append(Some(tr("no_recent")), None);
+    }
+    for path in list {
+        // Rótulos de menu tratam `_` como mnemônico; dobrar o mantém visível.
+        // Itens de menu não reticenciam sozinhos: o texto já vai encurtado.
+        let label = format!(
+            "{}  —  {}",
+            shorten_middle(&file_name(path), RECENT_MAX_CHARS),
+            shorten_middle(&display_dir(path), RECENT_MAX_CHARS)
+        )
+        .replace('_', "__");
+        let item = gio::MenuItem::new(Some(&label), None);
+        item.set_action_and_target_value(
+            Some("win.open-recent"),
+            Some(&path.to_string_lossy().to_variant()),
+        );
+        files.append_item(&item);
+    }
+    menu.append_section(None, &files);
+    if !list.is_empty() {
+        let actions = gio::Menu::new();
+        actions.append(Some(tr("clear_recent")), Some("win.clear-recent"));
+        menu.append_section(None, &actions);
+    }
 }
 
 /// Substitui o documento exibido na pilha e atualiza título/estado.
@@ -405,6 +618,7 @@ fn open_into(
     glib::spawn_future_local(async move {
         match handle.await {
             Ok(Loaded::Table(dp, initial)) => {
+                recent::add(&path_ui);
                 let view = DocumentView::new(dp, path_ui);
                 // Instala a tabela mas mantém o spinner até a carga terminar.
                 install_doc(
@@ -424,6 +638,7 @@ fn open_into(
                 });
             }
             Ok(Loaded::Text(contents)) => {
+                recent::add(&path_ui);
                 let doc = OpenDoc::Text(TextDocView::new(
                     path_ui,
                     &contents.text,
@@ -729,6 +944,20 @@ pub fn run() -> glib::ExitCode {
             /* Remove o contorno de foco quadrado desenhado ao navegar
                por teclado; o fundo arredondado do :selected já indica
                a linha ativa. */
+            listbox.recent-list {
+                border-radius: 8px;
+            }
+            listbox.recent-list row {
+                border-radius: 0;
+            }
+            listbox.recent-list row:first-child {
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+            }
+            listbox.recent-list row:last-child {
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+            }
             listbox.filter-suggestions row:focus,
             listbox.filter-suggestions row:focus-visible,
             listbox.filter-suggestions row:focus-within {

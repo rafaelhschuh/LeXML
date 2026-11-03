@@ -135,6 +135,7 @@ impl TextDocView {
             .to_string();
         match crate::xmldoc::write_atomic(path, text.as_bytes()) {
             Ok(()) => {
+                crate::recent::add(path);
                 *self.dirty.borrow_mut() = false;
                 *self.path.borrow_mut() = path.to_path_buf();
                 self.status

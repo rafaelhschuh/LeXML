@@ -5,6 +5,7 @@ mod i18n;
 mod xmldoc;
 mod document;
 mod textdoc;
+mod recent;
 mod row_object;
 
 fn main() -> gtk::glib::ExitCode {

@@ -33,6 +33,19 @@ Use uma destas opções:
 lexml-gtk caminho/arquivo.xml
 ```
 
+### Arquivos recentes
+
+Os últimos 12 arquivos abertos ou salvos ficam guardados em
+`~/.config/lexml/recentes.txt`. Para reabrir um deles:
+
+- clique no arquivo na lista **Recentes** da tela inicial, que mostra os 8
+  mais recentes;
+- ou clique na seta ao lado do botão **Abrir**, no cabeçalho, para ver a
+  lista completa.
+
+Arquivos que foram movidos ou excluídos deixam de aparecer. **Limpar lista**
+esvazia o histórico.
+
 A primeira abertura reutiliza a janela inicial vazia. Se uma janela já contém
 um documento, o próximo arquivo é aberto em outra janela. Também é possível
 informar vários arquivos ao aplicativo; cada um recebe sua própria janela.

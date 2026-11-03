@@ -980,6 +980,7 @@ impl DocumentView {
     fn write_to(self: &Rc<Self>, path: &std::path::Path) -> bool {
         match self.state.dp.save(path) {
             Ok(()) => {
+                crate::recent::add(path);
                 *self.state.dirty.borrow_mut() = false;
                 *self.state.saved_path.borrow_mut() = Some(path.to_path_buf());
                 let when = glib::DateTime::now_local()
