@@ -56,7 +56,13 @@ pub struct DocumentView {
     cur_widget: RefCell<Option<gtk::Widget>>,
     // Widget de cada célula → seu ListItem, para achar a linha sob o
     // ponteiro ao arrastar a seleção.
-    cell_items: RefCell<std::collections::HashMap<gtk::Widget, glib::WeakRef<gtk::ListItem>>>,
+    cell_items: RefCell<std::collections::HashMap<gtk::Widget, (glib::WeakRef<gtk::ListItem>, usize)>>,
+    // Seleção de células (retângulos de linhas × colunas), para limpar o
+    // conteúdo com Backspace. Copiar/colar continuam agindo sobre linhas.
+    cell_rects: RefCell<Vec<CellRect>>,
+    // Coluna da âncora do Shift (a linha da âncora é `anchor`).
+    anchor_col: Cell<usize>,
+
     anchor: RefCell<Option<RowObject>>,
     // Seção do menu de contexto com "Colar", preenchida só quando a área de
     // transferência tem linhas.
@@ -317,7 +323,9 @@ impl DocumentView {
         sec_move.append(Some(tr("ctx_row_move_down")), Some("doc.row-move-down"));
         rows_menu.append_section(None, &sec_move);
         let sec_row_del = gio::Menu::new();
-        sec_row_del.append(Some(tr("ctx_row_delete")), Some("doc.row-delete"));
+        let del_item = gio::MenuItem::new(Some(tr("ctx_row_delete")), Some("doc.row-delete"));
+        del_item.set_attribute_value("accel", Some(&"Delete".to_variant()));
+        sec_row_del.append_item(&del_item);
         rows_menu.append_section(None, &sec_row_del);
         menu_model.append_submenu(Some(tr("ctx_row_menu")), &rows_menu);
 
@@ -331,6 +339,9 @@ impl DocumentView {
 
         // Atalho em destaque, fora dos submenus: Somar coluna.
         let sec_quick = gio::Menu::new();
+        let clear_item = gio::MenuItem::new(Some(tr("ctx_cells_clear")), Some("doc.cells-clear"));
+        clear_item.set_attribute_value("accel", Some(&"BackSpace".to_variant()));
+        sec_quick.append_item(&clear_item);
         sec_quick.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
         menu_model.append_section(None, &sec_quick);
 
@@ -371,6 +382,8 @@ impl DocumentView {
             cur_cell: RefCell::new(None),
             cur_widget: RefCell::new(None),
             cell_items: RefCell::default(),
+            cell_rects: RefCell::default(),
+            anchor_col: Cell::new(0),
             anchor: RefCell::new(None),
             paste_section,
             sel_label,
@@ -413,6 +426,7 @@ impl DocumentView {
         };
         actions.add_action(&mk("row-above", Box::new(clone!(@strong me => move || me.ctx_insert_row(true)))));
         actions.add_action(&mk("row-below", Box::new(clone!(@strong me => move || me.ctx_insert_row(false)))));
+        actions.add_action(&mk("cells-clear", Box::new(clone!(@strong me => move || me.clear_selected_cells()))));
         actions.add_action(&mk("row-copy", Box::new(clone!(@strong me => move || { me.copy_rows(); }))));
         actions.add_action(&mk("paste-above", Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), true)))));
         actions.add_action(&mk("paste-below", Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), false)))));
@@ -462,6 +476,7 @@ impl DocumentView {
                 match keyval {
                     gdk::Key::a | gdk::Key::A => {
                         me_keys.selection.select_all();
+                        me_keys.select_all_cells();
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::c | gdk::Key::C => {
@@ -475,6 +490,21 @@ impl DocumentView {
                     gdk::Key::v | gdk::Key::V => {
                         let cur = me_keys.cursor.borrow().as_ref().map(|r| r.rowid());
                         me_keys.paste_rows(cur, false);
+                        return glib::Propagation::Stop;
+                    }
+                    _ => {}
+                }
+            }
+            // Backspace limpa as células selecionadas; Delete exclui as
+            // linhas selecionadas (num campo de texto, os dois apagam texto).
+            if !ctrl && !me_keys.text_has_focus() {
+                match keyval {
+                    gdk::Key::BackSpace => {
+                        me_keys.clear_selected_cells();
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::Delete | gdk::Key::KP_Delete => {
+                        me_keys.delete_selected_rows();
                         return glib::Propagation::Stop;
                     }
                     _ => {}
@@ -572,6 +602,12 @@ impl DocumentView {
         *me.weak_self.borrow_mut() = Rc::downgrade(&me);
         me.close_menus_on_outside_click();
         me.arm_drag_select();
+        let weak = Rc::downgrade(&me);
+        me.store.connect_items_changed(move |_, _, _, _| {
+            if let Some(me) = weak.upgrade() {
+                me.on_store_changed();
+            }
+        });
 
         // A carga inicial (completa) é disparada por quem cria a view
         // (`load_initial`/`load_blank`), fora da thread de UI e em blocos.
@@ -980,6 +1016,19 @@ impl DocumentView {
                         }
                         return glib::Propagation::Proceed;
                     }
+                    // Shift+←/→: estende a seleção de células pela linha.
+                    let shift = _state.contains(gdk::ModifierType::SHIFT_MASK);
+                    if shift && matches!(keyval, gdk::Key::Left | gdk::Key::Right) {
+                        let ncol = me_key.state.columns.borrow().len();
+                        let cur = me_key.cur_cell.borrow().as_ref().map_or(col_idx, |(_, c)| *c);
+                        let to = if keyval == gdk::Key::Left { cur.saturating_sub(1) } else { (cur + 1).min(ncol.saturating_sub(1)) };
+                        let pos = li_key.position();
+                        if let Some(w) = me_key.cell_widget(pos, to) {
+                            w.grab_focus();
+                        }
+                        me_key.select_cells_to(pos, to);
+                        return glib::Propagation::Stop;
+                    }
                     let dir = match keyval {
                         gdk::Key::Left => Some(gtk::DirectionType::Left),
                         gdk::Key::Right => Some(gtk::DirectionType::Right),
@@ -1003,11 +1052,21 @@ impl DocumentView {
                                 None
                             };
                             if let Some(t) = target {
-                                if _state.contains(gdk::ModifierType::SHIFT_MASK) {
+                                if shift {
                                     me_key.select_range_to(t);
+                                    me_key.select_cells_to(t, col_idx);
                                 } else {
                                     me_key.select_only(t);
+                                    me_key.select_single_cell(t, col_idx);
                                 }
+                            } else if !shift && matches!(keyval, gdk::Key::Left | gdk::Key::Right) {
+                                let ncol = me_key.state.columns.borrow().len();
+                                let to = if keyval == gdk::Key::Left {
+                                    col_idx.saturating_sub(1)
+                                } else {
+                                    (col_idx + 1).min(ncol.saturating_sub(1))
+                                };
+                                me_key.select_single_cell(pos, to);
                             }
 
                             return glib::Propagation::Stop;
@@ -1048,7 +1107,7 @@ impl DocumentView {
                 if let Some(me) = me.upgrade() {
                     me.cell_items
                         .borrow_mut()
-                        .insert(label.clone().upcast(), list_item.downgrade());
+                        .insert(label.clone().upcast(), (list_item.downgrade(), col_idx));
                 }
 
                 // menu de contexto (botão direito) sensível à linha/coluna
@@ -1076,6 +1135,11 @@ impl DocumentView {
                             *me_ctx.cursor.borrow_mut() = me_ctx.store.item(pos).and_downcast();
                         } else {
                             me_ctx.select_only(pos);
+                        }
+                        // idem para as células: fora da seleção, só a clicada
+                        let in_cells = me_ctx.cell_rects.borrow().iter().any(|r| r.contains(pos, col_idx));
+                        if !in_cells {
+                            me_ctx.select_single_cell(pos, col_idx);
                         }
                     }
                     me_ctx.ctx_col.set(col_idx);
@@ -1118,15 +1182,21 @@ impl DocumentView {
                     }
                     let mods = g.current_event_state();
                     if mods.contains(gdk::ModifierType::CONTROL_MASK) {
-                        // Ctrl+clique: marca/desmarca a linha, sem editar
+                        // Ctrl+clique: marca/desmarca a linha e a célula, sem editar
                         me_sel.toggle_row(pos);
+                        me_sel.toggle_cell(pos, col_idx);
                     } else if mods.contains(gdk::ModifierType::SHIFT_MASK) {
                         // Shift+clique: seleciona o intervalo desde a âncora
                         me_sel.select_range_to(pos);
-                    } else if me_sel.cursor_pos() != pos || me_sel.selection.selection().size() != 1 {
+                        me_sel.select_cells_to(pos, col_idx);
+                    } else if me_sel.cursor_pos() != pos
+                        || me_sel.selection.selection().size() != 1
+                        || me_sel.selected_cell_count() > 1
+                    {
                         // 1º clique: seleciona só esta linha e foca a célula,
                         // mas bloqueia a edição
                         me_sel.select_only(pos);
+                        me_sel.select_single_cell(pos, col_idx);
                     } else {
                         // linha já selecionada sozinha: não reivindica →
                         // o EditableLabel entra em edição
@@ -1188,10 +1258,11 @@ impl DocumentView {
                         .is_some_and(|(r, c)| *r == row && *c == col_idx);
                     if is_cur {
                         cell.add_css_class("cell-current");
-                        *me.cur_widget.borrow_mut() = Some(cell);
+                        *me.cur_widget.borrow_mut() = Some(cell.clone());
                     } else {
                         cell.remove_css_class("cell-current");
                     }
+                    me.style_selected_cell(&cell, list_item.position(), col_idx);
                 }
             });
 
@@ -1563,25 +1634,38 @@ impl DocumentView {
         });
     }
 
-    /// Reflete na grade substituições já gravadas. Muitas linhas viram um
-    /// único aviso de mudança, em vez de um por linha.
+    /// Reflete na grade substituições já gravadas: troca os valores nos
+    /// objetos das linhas e atualiza as células que estão na tela.
     fn show_replacements(&self, changed: Vec<(u32, RowObject, Vec<(usize, String)>)>) {
-        // Conta linhas distintas: o desfazer traz uma entrada por célula.
-        let rows: std::collections::HashSet<u32> = changed.iter().map(|(p, _, _)| *p).collect();
-        let many = rows.len() > 500;
-        for (pos, row, reps) in changed {
+        for (_, row, reps) in changed {
             for (c, v) in reps {
                 row.set_value(c, v);
             }
-            if !many {
-                self.store.items_changed(pos, 1, 1);
-            }
         }
-        if many {
-            let selected = self.selected_rows();
-            let n = self.store.n_items();
-            self.store.items_changed(0, n, n);
-            self.restore_selection(&selected);
+        self.refresh_visible_cells();
+    }
+
+    /// Reescreve o texto das células visíveis a partir dos objetos das
+    /// linhas. Avisar o store com `items_changed` não basta: quando o objeto
+    /// é o mesmo, o GTK reaproveita o widget sem refazer o bind, e a célula
+    /// continuaria mostrando o valor antigo. As linhas fora da tela pegam o
+    /// valor novo no bind, ao aparecerem.
+    fn refresh_visible_cells(&self) {
+        let cells: Vec<(gtk::Widget, RowObject, usize)> = self
+            .cell_items
+            .borrow()
+            .iter()
+            .filter_map(|(w, (li, col))| {
+                let row = li.upgrade()?.item()?.downcast::<RowObject>().ok()?;
+                Some((w.clone(), row, *col))
+            })
+            .collect();
+        for (w, row, col) in cells {
+            let Ok(label) = w.downcast::<gtk::EditableLabel>() else { continue };
+            let v = row.value(col);
+            if !label.is_editing() && label.text() != v {
+                label.set_text(&v);
+            }
         }
     }
 
@@ -1626,12 +1710,7 @@ impl DocumentView {
             .collect();
         match self.state.dp.update_cells(&edits) {
             Ok(n) => {
-                for (pos, row, reps) in changed {
-                    for (c, v) in reps {
-                        row.set_value(c, v);
-                    }
-                    self.store.items_changed(pos, 1, 1);
-                }
+                self.show_replacements(changed);
                 if n > 0 {
                     self.mark_dirty();
                 }
@@ -1984,8 +2063,7 @@ impl DocumentView {
                 };
                 if let Some(obj) = self.store.item(pos) {
                     obj.downcast::<RowObject>().unwrap().set_value(col, value);
-                    // força o rebind da linha para a célula mostrar o valor
-                    self.store.items_changed(pos, 1, 1);
+                    self.refresh_visible_cells();
                 }
                 self.select_rowid(rowid);
             }
@@ -2228,13 +2306,13 @@ impl DocumentView {
 
     /// Célula sob o ponto `(x, y)` da tabela: posição da linha no store e o
     /// widget da célula.
-    fn cell_at(&self, x: f64, y: f64) -> Option<(u32, gtk::Widget)> {
+    fn cell_at(&self, x: f64, y: f64) -> Option<(u32, usize, gtk::Widget)> {
         let mut w = self.colview.pick(x, y, gtk::PickFlags::DEFAULT);
         let items = self.cell_items.borrow();
         while let Some(cur) = w {
-            if let Some(li) = items.get(&cur).and_then(|li| li.upgrade()) {
-                let pos = li.position();
-                return (pos != gtk::INVALID_LIST_POSITION).then_some((pos, cur));
+            if let Some((li, col)) = items.get(&cur) {
+                let pos = li.upgrade().map_or(gtk::INVALID_LIST_POSITION, |li| li.position());
+                return (pos != gtk::INVALID_LIST_POSITION).then_some((pos, *col, cur));
             }
             w = cur.parent();
         }
@@ -2243,7 +2321,14 @@ impl DocumentView {
 
     /// Linha (posição no store) sob o ponto `(x, y)` da tabela.
     fn row_at(&self, x: f64, y: f64) -> Option<u32> {
-        self.cell_at(x, y).map(|(pos, _)| pos)
+        self.cell_at(x, y).map(|(pos, _, _)| pos)
+    }
+
+    /// Widget visível da célula (linha `pos`, coluna `col`), se houver.
+    fn cell_widget(&self, pos: u32, col: usize) -> Option<gtk::Widget> {
+        self.cell_items.borrow().iter().find_map(|(w, (li, c))| {
+            (*c == col && li.upgrade().is_some_and(|li| li.position() == pos)).then(|| w.clone())
+        })
     }
 
     /// Arrastar com o botão esquerdo seleciona as linhas do ponto de partida
@@ -2261,7 +2346,9 @@ impl DocumentView {
         let s1 = st.clone();
         drag.connect_drag_begin(move |_, x, y| {
             s1.active.set(false);
-            s1.start.set(weak.upgrade().and_then(|me| me.row_at(x, y)));
+            let cell = weak.upgrade().and_then(|me| me.cell_at(x, y));
+            s1.start.set(cell.as_ref().map(|(pos, _, _)| *pos));
+            s1.start_col.set(cell.map_or(0, |(_, col, _)| col));
             s1.last.set((x, y));
         });
 
@@ -2285,6 +2372,7 @@ impl DocumentView {
                 g.set_state(gtk::EventSequenceState::Claimed);
                 me.commit_pending_edit();
                 *me.anchor.borrow_mut() = me.store.item(from).and_downcast();
+                me.anchor_col.set(s2.start_col.get());
             }
             me.drag_select_step(&s2);
             // Perto da borda, um temporizador continua rolando mesmo com o
@@ -2332,9 +2420,10 @@ impl DocumentView {
             scrolled = adj.value() != before;
         }
         let probe = y.clamp(HEADER + 2.0, (h - 2.0).max(HEADER + 2.0));
-        if let Some((to, cell)) = self.cell_at(x, probe) {
+        if let Some((to, col, cell)) = self.cell_at(x, probe) {
             let (lo, hi) = (from.min(to), from.max(to));
             self.selection.select_range(lo, hi - lo + 1, true);
+            self.set_cell_rects(vec![CellRect::new(from, to, st.start_col.get(), col)]);
             *self.cursor.borrow_mut() = self.store.item(to).and_downcast();
             // O contorno (e o foco do teclado) acompanha a célula sob o
             // ponteiro, junto com o destaque das linhas.
@@ -2391,6 +2480,142 @@ impl DocumentView {
             *self.cur_widget.borrow_mut() = Some(cell);
         }
         *self.cur_cell.borrow_mut() = Some((row, col));
+    }
+
+    // ---------- seleção de células ----------
+
+    fn set_cell_rects(&self, rects: Vec<CellRect>) {
+        *self.cell_rects.borrow_mut() = rects;
+        self.refresh_cell_classes();
+    }
+
+    /// Total de células selecionadas.
+    fn selected_cell_count(&self) -> u64 {
+        self.cell_rects.borrow().iter().map(|r| r.cells()).sum()
+    }
+
+    /// Seleciona só a célula (`pos`, `col`), que vira a âncora do Shift.
+    fn select_single_cell(&self, pos: u32, col: usize) {
+        self.anchor_col.set(col);
+        self.set_cell_rects(vec![CellRect::new(pos, pos, col, col)]);
+    }
+
+    /// Shift: retângulo da célula âncora até (`pos`, `col`).
+    fn select_cells_to(&self, pos: u32, col: usize) {
+        let anchor = self.anchor.borrow().as_ref().and_then(|r| self.store.find(r)).unwrap_or(pos);
+        self.set_cell_rects(vec![CellRect::new(anchor, pos, self.anchor_col.get(), col)]);
+    }
+
+    /// Ctrl: acrescenta ou tira a célula da seleção.
+    fn toggle_cell(&self, pos: u32, col: usize) {
+        let mut rects = self.cell_rects.borrow().clone();
+        let single = CellRect::new(pos, pos, col, col);
+        if let Some(i) = rects.iter().position(|r| *r == single) {
+            rects.remove(i);
+        } else {
+            rects.push(single);
+        }
+        self.anchor_col.set(col);
+        self.set_cell_rects(rects);
+    }
+
+    fn select_all_cells(&self) {
+        let (n, ncol) = (self.store.n_items(), self.state.columns.borrow().len());
+        if n > 0 && ncol > 0 {
+            self.set_cell_rects(vec![CellRect::new(0, n - 1, 0, ncol - 1)]);
+        }
+    }
+
+    /// Destaca (ou não) uma célula conforme a seleção. Uma célula sozinha
+    /// não ganha o destaque: o contorno da célula atual já a indica.
+    fn style_selected_cell(&self, cell: &gtk::Widget, pos: u32, col: usize) {
+        let rects = self.cell_rects.borrow();
+        let multi = rects.len() > 1 || rects.first().is_some_and(|r| r.cells() > 1);
+        if multi && rects.iter().any(|r| r.contains(pos, col)) {
+            cell.add_css_class("cell-selected");
+        } else {
+            cell.remove_css_class("cell-selected");
+        }
+    }
+
+    /// Reaplica o destaque nas células visíveis (as outras ganham ao serem
+    /// mostradas, no bind).
+    fn refresh_cell_classes(&self) {
+        let items: Vec<(gtk::Widget, u32, usize)> = self
+            .cell_items
+            .borrow()
+            .iter()
+            .filter_map(|(w, (li, col))| li.upgrade().map(|li| (w.clone(), li.position(), *col)))
+            .collect();
+        for (w, pos, col) in items {
+            if let Some(cell) = w.parent() {
+                self.style_selected_cell(&cell, pos, col);
+            }
+        }
+    }
+
+    /// Linhas entraram, saíram ou mudaram de ordem: as posições guardadas
+    /// na seleção de células não valem mais, então ela é desfeita (uma
+    /// limpeza com Backspace não pode cair em outras células).
+    fn on_store_changed(&self) {
+        if self.cell_rects.borrow().is_empty() {
+            return;
+        }
+        self.cell_rects.borrow_mut().clear();
+        self.refresh_cell_classes();
+    }
+
+    /// Backspace: apaga o conteúdo das células selecionadas (ou da célula
+    /// atual), num único passo de desfazer.
+    fn clear_selected_cells(self: &Rc<Self>) {
+        if !self.can_replace() {
+            return;
+        }
+        let mut rects = self.cell_rects.borrow().clone();
+        if rects.is_empty() {
+            let cur = self.cur_cell.borrow().clone();
+            let Some((row, col)) = cur else { return };
+            let Some(pos) = self.store.find(&row) else { return };
+            rects.push(CellRect::new(pos, pos, col, col));
+        }
+        let ncol = self.state.columns.borrow().len();
+        let mut by_row: std::collections::BTreeMap<u32, std::collections::BTreeSet<usize>> =
+            Default::default();
+        for r in &rects {
+            for pos in r.r0..=r.r1.min(self.store.n_items().saturating_sub(1)) {
+                by_row.entry(pos).or_default().extend((r.c0..=r.c1).filter(|&c| c < ncol));
+            }
+        }
+        let changed: Vec<(u32, RowObject, Vec<(usize, String)>)> = by_row
+            .into_iter()
+            .filter_map(|(pos, cols)| {
+                let row = self.store.item(pos).and_downcast::<RowObject>()?;
+                let reps: Vec<(usize, String)> = cols
+                    .into_iter()
+                    .filter(|&c| !row.value(c).is_empty())
+                    .map(|c| (c, String::new()))
+                    .collect();
+                (!reps.is_empty()).then_some((pos, row, reps))
+            })
+            .collect();
+        let n = self.apply_replacements(changed);
+        self.status.set_text(&format!("{n} {}", tr("cells_cleared")));
+    }
+
+    /// Delete: exclui as linhas selecionadas (ou a linha atual).
+    fn delete_selected_rows(self: &Rc<Self>) {
+        if !self.can_replace() {
+            return;
+        }
+        let mut ids: Vec<i64> = self.selected_rows().iter().map(|r| r.rowid()).collect();
+        if ids.is_empty() {
+            if let Some(r) = self.cursor.borrow().as_ref() {
+                ids.push(r.rowid());
+            }
+        }
+        let n = ids.len();
+        self.delete_rowids(&ids);
+        self.status.set_text(&format!("{n} {}", tr("rows_deleted")));
     }
 
     // ---------- seleção ----------
@@ -2789,11 +3014,37 @@ impl DocumentView {
     }
 }
 
+/// Retângulo de células selecionadas: linhas `r0..=r1` × colunas `c0..=c1`
+/// (posições na grade).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct CellRect {
+    r0: u32,
+    r1: u32,
+    c0: usize,
+    c1: usize,
+}
+
+impl CellRect {
+    fn new(ra: u32, rb: u32, ca: usize, cb: usize) -> Self {
+        Self { r0: ra.min(rb), r1: ra.max(rb), c0: ca.min(cb), c1: ca.max(cb) }
+    }
+
+    fn contains(&self, row: u32, col: usize) -> bool {
+        (self.r0..=self.r1).contains(&row) && (self.c0..=self.c1).contains(&col)
+    }
+
+    fn cells(&self) -> u64 {
+        u64::from(self.r1 - self.r0 + 1) * (self.c1 - self.c0 + 1) as u64
+    }
+}
+
 /// Estado da seleção por arrasto (ver `DocumentView::arm_drag_select`).
 #[derive(Default)]
 struct DragSelect {
     /// Linha onde o arrasto começou (`None` fora das linhas: cabeçalho etc.).
     start: Cell<Option<u32>>,
+    /// Coluna onde o arrasto começou.
+    start_col: Cell<usize>,
     /// O arrasto já virou seleção de linhas.
     active: Cell<bool>,
     /// Última posição do ponteiro, na tabela.
@@ -2922,5 +3173,19 @@ fn move_selection(listbox: &gtk::ListBox, delta: i32) {
     }
     if let Some(row) = listbox.row_at_index(idx) {
         listbox.select_row(Some(&row));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retangulo_de_celulas_normaliza_os_cantos() {
+        let r = CellRect::new(7, 3, 2, 0);
+        assert_eq!((r.r0, r.r1, r.c0, r.c1), (3, 7, 0, 2));
+        assert!(r.contains(3, 0) && r.contains(7, 2) && r.contains(5, 1));
+        assert!(!r.contains(8, 1) && !r.contains(5, 3));
+        assert_eq!(r.cells(), 15);
     }
 }

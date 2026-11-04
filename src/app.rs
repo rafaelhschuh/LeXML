@@ -1073,10 +1073,17 @@ pub fn run() -> glib::ExitCode {
             /* Destaque mais forte na célula atual. Vem de uma classe, e não
                de :focus-within, para continuar visível com o menu de
                contexto aberto ou o foco em outro lugar da janela. */
-            columnview cell.cell-current {
+            columnview > listview > row cell.cell-current,
+            columnview > listview > row:selected cell.cell-current {
                 outline: 2px solid @accent_bg_color;
                 outline-offset: -2px;
                 background-color: alpha(@accent_bg_color, 0.15);
+            }
+            /* Células selecionadas (Shift, Ctrl, arrasto): tom mais forte
+               que o da linha selecionada. */
+            columnview > listview > row cell.cell-selected,
+            columnview > listview > row:selected cell.cell-selected {
+                background-color: alpha(@accent_bg_color, 0.28);
             }
             /* Limpa o foco nativo do EditableLabel para não
                duplicar com o contorno da célula. */

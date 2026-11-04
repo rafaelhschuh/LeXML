@@ -186,6 +186,21 @@ livre está sendo exibida.
 O rodapé mostra quantas linhas estão selecionadas. Clicar na área vazia
 abaixo da última linha limpa a seleção.
 
+### Selecionar células e apagar
+
+Junto com as linhas, a seleção marca um retângulo de **células**, com um tom
+mais forte: do ponto onde o arrasto, o `Shift`+clique ou o `Shift`+seta
+começou até a célula atual. `Shift+←` e `Shift+→` estendem o retângulo pela
+linha, e `Ctrl`+clique acrescenta ou tira células soltas.
+
+- `Backspace` (ou **Limpar célula(s)** no botão direito) apaga o conteúdo das
+  células selecionadas — ou só da célula atual, se nenhuma estiver marcada;
+- `Delete` exclui as linhas selecionadas.
+
+As duas ações são desfeitas com um único `Ctrl+Z`. Copiar, recortar e colar
+continuam agindo sobre linhas inteiras. A seleção de células é desfeita
+quando as linhas mudam de lugar (ordenar, colar, excluir, filtrar).
+
 ### Copiar, recortar e colar
 
 | Ação | Atalho | Menu |
@@ -526,6 +541,8 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 | Copiar / recortar / colar linhas | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
 | Estender a seleção | `Shift+↑` / `Shift+↓`, `Shift`+clique |
 | Marcar linhas soltas | `Ctrl`+clique |
+| Limpar células selecionadas | `Backspace` |
+| Excluir linhas selecionadas | `Delete` |
 | Desfazer | `Ctrl+Z` |
 | Refazer | `Ctrl+Shift+Z` ou `Ctrl+Y` |
 | Ir para Localizar | `Ctrl+F` |
