@@ -163,6 +163,10 @@ impl DocumentView {
         undo_btn.set_sensitive(false);
         bar.append(&undo_btn);
 
+        let history_btn = gtk::Button::from_icon_name("document-open-recent-symbolic");
+        history_btn.set_tooltip_text(Some(tr("history_tooltip")));
+        bar.append(&history_btn);
+
         let redo_btn = gtk::Button::from_icon_name("edit-redo-symbolic");
         redo_btn.set_tooltip_text(Some(tr("redo_tooltip")));
         redo_btn.set_sensitive(false);
@@ -201,10 +205,6 @@ impl DocumentView {
         let csv_btn = gtk::Button::from_icon_name("x-office-spreadsheet-symbolic");
         csv_btn.set_tooltip_text(Some(tr("csv_tooltip")));
         bar.append(&csv_btn);
-
-        let history_btn = gtk::Button::from_icon_name("document-open-recent-symbolic");
-        history_btn.set_tooltip_text(Some(tr("history_tooltip")));
-        bar.append(&history_btn);
 
         // Ícone de disquete: padrão universal de "salvar".
         let save_btn = gtk::Button::from_icon_name("media-floppy-symbolic");

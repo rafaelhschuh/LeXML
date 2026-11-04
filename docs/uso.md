@@ -68,6 +68,12 @@ Clique no botão **Novo** do cabeçalho. Um novo documento começa com:
 
 O primeiro salvamento abre o seletor de destino.
 
+### Voltar à tela inicial
+
+O botão **Início** (casa), ao lado de **Novo**, fecha o documento da janela e
+volta à tela inicial com a lista de recentes. Se houver edições não salvas, o
+Lê-XML pergunta antes se deve salvar, fechar sem salvar ou cancelar.
+
 ## Modos de visualização
 
 ### Modo tabela
@@ -461,7 +467,7 @@ O Lê-XML guarda backups fora da pasta do arquivo, em
 
 ### Histórico de versões
 
-O botão de relógio na barra de ferramentas abre o histórico do arquivo:
+O botão de relógio, entre **Desfazer** e **Refazer**, abre o histórico do arquivo:
 à esquerda, as versões da mais recente para a mais antiga, cada uma com data,
 hora e tipo (**Como estava salvo**, **Edição não salva** ou **Antes de
 restaurar outra versão**); à direita, numa tabela com as colunas do arquivo,

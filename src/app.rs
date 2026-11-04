@@ -142,6 +142,11 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     new_btn.set_tooltip_text(Some(tr("new_file_tooltip")));
     header.pack_start(&new_btn);
 
+    let home_btn = gtk::Button::from_icon_name("go-home-symbolic");
+    home_btn.set_tooltip_text(Some(tr("home_tooltip")));
+    home_btn.set_sensitive(false);
+    header.pack_start(&home_btn);
+
     let title = TitleWidget::new("Lê-XML", tr("app_subtitle"));
     header.set_title_widget(Some(&title.container));
 
@@ -158,6 +163,9 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     let (placeholder, open_center, recent_box) = build_placeholder();
     stack.add_named(&placeholder, Some("empty"));
     window.set_child(Some(&stack));
+    stack.connect_visible_child_name_notify(clone!(@weak home_btn => move |s| {
+        home_btn.set_sensitive(s.visible_child_name().as_deref() == Some("doc"));
+    }));
 
     // mantém o documento vivo
     let current: Rc<RefCell<Option<OpenDoc>>> = Rc::new(RefCell::new(None));
@@ -292,40 +300,40 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
                 }
                 return glib::Propagation::Proceed;
             }
-            let alert = gtk::AlertDialog::builder()
-                .modal(true)
-                .message(tr("unsaved_title"))
-                .detail(tr("unsaved_body"))
-                .buttons([tr("cancel"), tr("close_without_saving"), tr("save_ellipsis")])
-                .cancel_button(0)
-                .default_button(2)
-                .build();
-            alert.choose(
-                Some(win),
-                gio::Cancellable::NONE,
-                clone!(@strong current, @strong confirmed_close, @weak win => move |res| {
-                    match res.unwrap_or(0) {
-                        1 => {
-                            confirmed_close.set(true);
-                            win.close();
-                        }
-                        2 => {
-                            if let Some(doc) = current.borrow().as_ref() {
-                                doc.save_then(clone!(@strong confirmed_close, @weak win => move |ok| {
-                                    if ok {
-                                        confirmed_close.set(true);
-                                        win.close();
-                                    }
-                                }));
-                            }
-                        }
-                        _ => {}
-                    }
-                }),
-            );
+            let proceed: Rc<dyn Fn()> = Rc::new(clone!(@strong confirmed_close, @weak win => move || {
+                confirmed_close.set(true);
+                win.close();
+            }));
+            confirm_unsaved(win, &current, proceed);
             glib::Propagation::Stop
         }
     ));
+
+    // volta à tela inicial, fechando o documento desta janela
+    {
+        let (window_w, stack, current, title) =
+            (window.downgrade(), stack.clone(), current.clone(), title.clone());
+        let refresh_recent = refresh_recent.clone();
+        home_btn.connect_clicked(move |_| {
+            let Some(window) = window_w.upgrade() else { return };
+            let go_home: Rc<dyn Fn()> = Rc::new(clone!(
+                @weak window, @weak stack, @strong current, @strong title, @strong refresh_recent => move || {
+                    if let Some(doc) = current.borrow_mut().take() {
+                        doc.discard_backup();
+                        doc.teardown();
+                    }
+                    stack.set_visible_child_name("empty");
+                    if let Some(child) = stack.child_by_name("doc") {
+                        stack.remove(&child);
+                    }
+                    title.set("Lê-XML", tr("app_subtitle"));
+                    window.set_title(Some("Lê-XML"));
+                    refresh_recent();
+                }
+            ));
+            confirm_unsaved(&window, &current, go_home);
+        });
+    }
 
     match initial {
         Initial::Open(path) => open_checked(&path, &window, &stack, &current, &title),
@@ -338,6 +346,43 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     }
 
     window
+}
+
+/// Com edições não salvas, pergunta Cancelar / Fechar sem salvar / Salvar…
+/// antes de `proceed`; sem edições segue direto.
+fn confirm_unsaved(
+    win: &gtk::ApplicationWindow,
+    current: &Rc<RefCell<Option<OpenDoc>>>,
+    proceed: Rc<dyn Fn()>,
+) {
+    let dirty = current.borrow().as_ref().map_or(false, |d| d.is_dirty());
+    if !dirty {
+        proceed();
+        return;
+    }
+    let alert = gtk::AlertDialog::builder()
+        .modal(true)
+        .message(tr("unsaved_title"))
+        .detail(tr("unsaved_body"))
+        .buttons([tr("cancel"), tr("close_without_saving"), tr("save_ellipsis")])
+        .cancel_button(0)
+        .default_button(2)
+        .build();
+    let current = current.clone();
+    alert.choose(Some(win), gio::Cancellable::NONE, move |res| match res.unwrap_or(0) {
+        1 => proceed(),
+        2 => {
+            if let Some(doc) = current.borrow().as_ref() {
+                let proceed = proceed.clone();
+                doc.save_then(move |ok| {
+                    if ok {
+                        proceed();
+                    }
+                });
+            }
+        }
+        _ => {}
+    });
 }
 
 thread_local! {

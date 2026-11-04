@@ -45,6 +45,7 @@ fn pt(key: &str) -> &'static str {
         // app / header
         "open_new_window_tooltip" => "Abrir XML em nova janela",
         "new_file_tooltip" => "Novo arquivo em branco",
+        "home_tooltip" => "Tela inicial (fecha o documento)",
         "app_subtitle" => "Leitor de XML em tabela",
         "open_file" => "Abrir arquivo",
         "no_file_open" => "Nenhum arquivo aberto",
@@ -244,6 +245,7 @@ fn en(key: &str) -> &'static str {
     match key {
         "open_new_window_tooltip" => "Open XML in a new window",
         "new_file_tooltip" => "New blank file",
+        "home_tooltip" => "Home screen (closes the document)",
         "app_subtitle" => "XML table reader",
         "open_file" => "Open file",
         "no_file_open" => "No file open",
