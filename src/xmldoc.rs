@@ -80,6 +80,9 @@ pub enum Change {
     ColumnRenamed { from: String, to: String },
     /// Várias células mudaram de valor: (rowid, coluna, valor).
     Cells(Vec<(i64, String, String)>),
+    /// Várias mudanças de linhas desfeitas/refeitas juntas (colar, excluir
+    /// várias linhas).
+    Batch(Vec<Change>),
 }
 
 pub struct XmlDoc {
@@ -894,11 +897,9 @@ impl XmlDoc {
                 }
             }
             Op::Batch(ops) => {
-                let mut cells = Vec::with_capacity(ops.len());
+                let mut changes = Vec::with_capacity(ops.len());
                 let mut apply_one = |op: &Op| -> Result<()> {
-                    if let Change::Cell { rowid, column, value } = self.apply(op, forward)? {
-                        cells.push((rowid, column, value));
-                    }
+                    changes.push(self.apply(op, forward)?);
                     Ok(())
                 };
                 if forward {
@@ -906,7 +907,20 @@ impl XmlDoc {
                 } else {
                     ops.iter().rev().try_for_each(&mut apply_one)?;
                 }
-                Change::Cells(cells)
+                // Lote só de células (Substituir todas): a forma compacta.
+                if changes.iter().all(|c| matches!(c, Change::Cell { .. })) {
+                    Change::Cells(
+                        changes
+                            .into_iter()
+                            .filter_map(|c| match c {
+                                Change::Cell { rowid, column, value } => Some((rowid, column, value)),
+                                _ => None,
+                            })
+                            .collect(),
+                    )
+                } else {
+                    Change::Batch(changes)
+                }
             }
             Op::RenameColumn { old, new } => {
                 let (from, to) = if forward { (old, new) } else { (new, old) };
@@ -926,6 +940,149 @@ impl XmlDoc {
             .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?;
         Ok(map)
+    }
+
+    /// Registra várias operações como um passo só de desfazer.
+    fn record_many(&self, mut ops: Vec<Op>) {
+        match ops.len() {
+            0 => {}
+            1 => self.record(ops.pop().unwrap()),
+            _ => self.record(Op::Batch(ops)),
+        }
+    }
+
+    /// Insere linhas coladas logo acima (ou abaixo) de `ref_rowid` — ou no
+    /// fim, sem referência —, como um único passo de desfazer. Cada linha é
+    /// uma lista de (atributo, valor); atributos sem coluna correspondente são
+    /// ignorados e devolvidos (sem repetição). Devolve as linhas criadas
+    /// (rowid e valores na ordem de `field_names()`), na ordem colada.
+    pub fn insert_rows(
+        &self,
+        ref_rowid: Option<i64>,
+        above: bool,
+        rows: &[Vec<(String, String)>],
+    ) -> Result<(Vec<(i64, Vec<String>)>, Vec<String>)> {
+        let names = self.field_names();
+        if names.is_empty() {
+            bail!("documento sem colunas");
+        }
+        let k = rows.len() as f64;
+        // Intervalo livre de ordem onde as linhas novas cabem, igualmente
+        // espaçadas, sem renumerar o resto do documento.
+        let ordc = self.q_ord();
+        let (lo, hi) = match ref_rowid {
+            Some(rid) => {
+                let r = self.ord_of(rid)?;
+                if above {
+                    let prev: Option<f64> = self.db.query_row(
+                        &format!("SELECT MAX({ordc}) FROM dados WHERE {ordc} < ?1"),
+                        [r],
+                        |x| x.get(0),
+                    )?;
+                    (prev.unwrap_or(r - (k + 1.0)), r)
+                } else {
+                    let next: Option<f64> = self.db.query_row(
+                        &format!("SELECT MIN({ordc}) FROM dados WHERE {ordc} > ?1"),
+                        [r],
+                        |x| x.get(0),
+                    )?;
+                    (r, next.unwrap_or(r + k + 1.0))
+                }
+            }
+            None => {
+                let max: f64 = self.db.query_row(
+                    &format!("SELECT COALESCE(MAX({ordc}), 0.0) FROM dados"),
+                    [],
+                    |x| x.get(0),
+                )?;
+                (max, max + k + 1.0)
+            }
+        };
+
+        let mut ignored: Vec<String> = Vec::new();
+        let mut created = Vec::with_capacity(rows.len());
+        let mut ops = Vec::with_capacity(rows.len());
+        let tx = self.db.unchecked_transaction()?;
+        for (i, attrs) in rows.iter().enumerate() {
+            for (key, _) in attrs {
+                if !names.contains(key) && !ignored.contains(key) {
+                    ignored.push(key.clone());
+                }
+            }
+            let values: Vec<String> = names
+                .iter()
+                .map(|n| {
+                    attrs.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap_or_default()
+                })
+                .collect();
+            let ord = lo + (hi - lo) * (i as f64 + 1.0) / (k + 1.0);
+            let mut cols: Vec<String> = names.iter().map(|n| quote_ident(n)).collect();
+            cols.push(ordc.clone());
+            let mut params: Vec<Value> = values.iter().map(|v| Value::Text(v.clone())).collect();
+            params.push(Value::Real(ord));
+            let ph: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+            self.db
+                .prepare_cached(&format!(
+                    "INSERT INTO dados ({}) VALUES ({})",
+                    cols.join(", "),
+                    ph.join(", ")
+                ))?
+                .execute(rusqlite::params_from_iter(params))?;
+            let rowid = self.db.last_insert_rowid();
+            ops.push(Op::InsertRow(RowSnap {
+                rowid,
+                ord,
+                values: names.iter().cloned().zip(values.iter().cloned()).collect(),
+            }));
+            created.push((rowid, values));
+        }
+        tx.commit()?;
+        self.record_many(ops);
+        Ok((created, ignored))
+    }
+
+    /// Exclui várias linhas como um único passo de desfazer.
+    pub fn delete_rows(&self, rowids: &[i64]) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        let mut ops = Vec::with_capacity(rowids.len());
+        for &rid in rowids {
+            let snap = self.row_snap(rid)?;
+            self.delete_row_raw(rid)?;
+            ops.push(Op::DeleteRow(snap));
+        }
+        tx.commit()?;
+        self.record_many(ops);
+        Ok(())
+    }
+
+    /// Valores das linhas `rowids` que passam pelo filtro, na ordem do
+    /// documento: (rowid, valores na ordem de `field_names()`).
+    pub fn visible_rows(&self, rowids: &[i64], where_clause: &str) -> Result<Vec<(i64, Vec<String>)>> {
+        if rowids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sel = vec![self.q_rid()];
+        sel.extend(self.field_names().iter().map(|n| quote_ident(n)));
+        let ids: Vec<String> = rowids.iter().map(|r| r.to_string()).collect();
+        let mut sql = format!(
+            "SELECT {} FROM dados WHERE {} IN ({})",
+            sel.join(", "),
+            self.q_rid(),
+            ids.join(", ")
+        );
+        if !where_clause.trim().is_empty() {
+            sql.push_str(&format!(" AND ({where_clause})"));
+        }
+        sql.push_str(&format!(" ORDER BY {}", self.q_ord()));
+        Ok(self
+            .run_readonly(&sql)?
+            .rows
+            .into_iter()
+            .map(|mut r| {
+                let rid = r.remove(0).parse().unwrap_or(-1);
+                (rid, r)
+            })
+            .collect())
     }
 
     /// Valores da linha `rowid` na ordem de `field_names()`, se ela existir e
@@ -1222,7 +1379,7 @@ fn is_name_char(c: char) -> bool {
 /// `true` se `s` é um Name XML válido. Nomes de campo viram nomes de atributo
 /// na gravação, onde não existe escape possível: validar na entrada é o que
 /// impede um `attrname` como `a" evil="1` de injetar atributos no arquivo.
-fn is_valid_xml_name(s: &str) -> bool {
+pub fn is_valid_xml_name(s: &str) -> bool {
     let mut it = s.chars();
     match it.next() {
         Some(c) if is_name_start(c) => {}
@@ -1384,7 +1541,7 @@ pub fn parse_number(s: &str) -> Option<f64> {
     br.parse::<f64>().ok()
 }
 
-fn xml_escape_attr(s: &str, out: &mut String) {
+pub fn xml_escape_attr(s: &str, out: &mut String) {
     for c in s.chars() {
         match c {
             '&' => out.push_str("&amp;"),
@@ -1540,6 +1697,38 @@ mod tests {
         assert!(!dp.can_undo(), "as duas células voltaram num passo só");
         dp.redo().unwrap();
         assert_eq!(saved(&dp), alterado);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn colar_varias_linhas_entre_vizinhas_e_desfazer_num_passo() {
+        let p = sample_xml();
+        let dp = XmlDoc::open(&p).unwrap();
+        let original = saved(&dp);
+        let r1 = rid_of(&dp, "1");
+        let rows = vec![
+            vec![("id".to_string(), "9".to_string()), ("extra".to_string(), "x".to_string())],
+            vec![("nome".to_string(), "Zeta".to_string())],
+        ];
+        let (created, ignored) = dp.insert_rows(Some(r1), false, &rows).unwrap();
+        assert_eq!(created.len(), 2);
+        assert_eq!(created[0].1, ["9", "", ""]);
+        assert_eq!(ignored, ["extra"]);
+        let ids: Vec<String> = dp.filter(None).unwrap().rows.iter().map(|r| r[1].clone()).collect();
+        assert_eq!(ids, ["1", "9", "", "2", "3"], "coladas logo abaixo da linha 1, na ordem");
+
+        match dp.undo().unwrap() {
+            Some(Change::Batch(c)) => assert_eq!(c.len(), 2),
+            _ => panic!("esperava Change::Batch"),
+        }
+        assert_eq!(saved(&dp), original);
+        assert!(!dp.can_undo());
+
+        let (r2, r3) = (rid_of(&dp, "2"), rid_of(&dp, "3"));
+        dp.delete_rows(&[r2, r3]).unwrap();
+        assert_eq!(dp.row_count(), 1);
+        dp.undo().unwrap();
+        assert_eq!(saved(&dp), original, "excluir várias e desfazer volta tudo");
         let _ = std::fs::remove_file(&p);
     }
 

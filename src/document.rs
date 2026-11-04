@@ -2,6 +2,7 @@ use crate::xmldoc::{Change, XmlDoc, QueryResult};
 use crate::row_object::RowObject;
 use crate::dialog;
 use crate::replace::Matcher;
+use crate::rowclip;
 use crate::sort::{cmp_keys, sort_key, SortKey};
 use crate::i18n::tr;
 use gtk::prelude::*;
@@ -40,7 +41,16 @@ pub struct DocumentView {
     pub root: gtk::Box,
     state: Rc<State>,
     store: gio::ListStore,
-    selection: gtk::SingleSelection,
+    selection: gtk::MultiSelection,
+    // Linha do cursor (onde Localizar continua, alvo de Ctrl+V) e âncora do
+    // Shift+clique/Shift+seta. Guardadas como objeto, e não posição, para
+    // continuarem certas depois de inserções e exclusões acima delas.
+    cursor: RefCell<Option<RowObject>>,
+    anchor: RefCell<Option<RowObject>>,
+    // Seção do menu de contexto com "Colar", preenchida só quando a área de
+    // transferência tem linhas.
+    paste_section: gio::Menu,
+    sel_label: gtk::Label,
     colview: gtk::ColumnView,
     status: gtk::Label,
     find_entry: gtk::SearchEntry,
@@ -196,7 +206,7 @@ impl DocumentView {
 
         // ---------- tabela ----------
         let store = gio::ListStore::new::<RowObject>();
-        let selection = gtk::SingleSelection::new(Some(store.clone()));
+        let selection = gtk::MultiSelection::new(Some(store.clone()));
         let colview = gtk::ColumnView::builder()
             .model(&selection)
             .show_row_separators(true)
@@ -250,13 +260,28 @@ impl DocumentView {
             .margin_bottom(4)
             .build();
         status.add_css_class("dim-label");
-        root.append(&status);
+        status.set_hexpand(true);
+        let sel_label = gtk::Label::builder().margin_end(8).build();
+        sel_label.add_css_class("dim-label");
+        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        footer.append(&status);
+        footer.append(&sel_label);
+        root.append(&footer);
 
         // ---------- menu de contexto (botão direito) ----------
         let menu_model = gio::Menu::new();
 
-        // Submenu "Linha": inserir / clonar / mover / excluir
+        // "Colar": só aparece quando há linhas copiadas (ver `popup_ctx_menu`).
+        let paste_section = gio::Menu::new();
+        menu_model.append_section(None, &paste_section);
+
+        // Submenu "Linha": copiar / inserir / clonar / mover / excluir
         let rows_menu = gio::Menu::new();
+        let sec_copy = gio::Menu::new();
+        let copy_item = gio::MenuItem::new(Some(tr("ctx_row_copy")), Some("doc.row-copy"));
+        copy_item.set_attribute_value("accel", Some(&"<Control>c".to_variant()));
+        sec_copy.append_item(&copy_item);
+        rows_menu.append_section(None, &sec_copy);
         let sec_insert = gio::Menu::new();
         sec_insert.append(Some(tr("ctx_row_above")), Some("doc.row-above"));
         sec_insert.append(Some(tr("ctx_row_below")), Some("doc.row-below"));
@@ -315,6 +340,10 @@ impl DocumentView {
             state,
             store,
             selection,
+            cursor: RefCell::new(None),
+            anchor: RefCell::new(None),
+            paste_section,
+            sel_label,
             colview,
             status,
             find_entry: find_entry.clone(),
@@ -350,6 +379,9 @@ impl DocumentView {
         };
         actions.add_action(&mk("row-above", Box::new(clone!(@strong me => move || me.ctx_insert_row(true)))));
         actions.add_action(&mk("row-below", Box::new(clone!(@strong me => move || me.ctx_insert_row(false)))));
+        actions.add_action(&mk("row-copy", Box::new(clone!(@strong me => move || { me.copy_rows(); }))));
+        actions.add_action(&mk("paste-above", Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), true)))));
+        actions.add_action(&mk("paste-below", Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), false)))));
         actions.add_action(&mk("row-delete", Box::new(clone!(@strong me => move || me.ctx_delete_row()))));
         actions.add_action(&mk("row-clone-above", Box::new(clone!(@strong me => move || me.ctx_clone_row(true)))));
         actions.add_action(&mk("row-clone-below", Box::new(clone!(@strong me => move || me.ctx_clone_row(false)))));
@@ -383,6 +415,30 @@ impl DocumentView {
             }
             let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+            // Ctrl+A/C/X/V agem sobre linhas, exceto num campo de texto, onde
+            // continuam selecionando/copiando/colando o texto.
+            if ctrl && !shift && !me_keys.text_has_focus() {
+                match keyval {
+                    gdk::Key::a | gdk::Key::A => {
+                        me_keys.selection.select_all();
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::c | gdk::Key::C => {
+                        me_keys.copy_rows();
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::x | gdk::Key::X => {
+                        me_keys.cut_rows();
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::v | gdk::Key::V => {
+                        let cur = me_keys.cursor.borrow().as_ref().map(|r| r.rowid());
+                        me_keys.paste_rows(cur, false);
+                        return glib::Propagation::Stop;
+                    }
+                    _ => {}
+                }
+            }
             let undo = ctrl && !shift && matches!(keyval, gdk::Key::z | gdk::Key::Z);
             let redo = ctrl
                 && (matches!(keyval, gdk::Key::y | gdk::Key::Y)
@@ -419,6 +475,10 @@ impl DocumentView {
         me.root.add_controller(save_keys);
 
         undo_btn.connect_clicked(clone!(@strong me => move |_| me.do_undo()));
+        me.selection.connect_selection_changed(clone!(@weak me => move |_, _, _| {
+            let n = me.selection.selection().size();
+            me.sel_label.set_text(&if n > 1 { format!("{n} {}", tr("rows_selected")) } else { String::new() });
+        }));
         replace_toggle.connect_toggled(clone!(@strong me => move |t| {
             if t.is_active() {
                 me.focus_replace_bar();
@@ -865,11 +925,11 @@ impl DocumentView {
                             }
                             let pos = li_key.position();
                             if keyval == gdk::Key::Up && pos > 0 {
-                                me_key.selection.set_selected(pos - 1);
+                                me_key.select_only(pos - 1);
                             } else if keyval == gdk::Key::Down
                                 && pos + 1 < me_key.store.n_items()
                             {
-                                me_key.selection.set_selected(pos + 1);
+                                me_key.select_only(pos + 1);
                             }
                             return glib::Propagation::Stop;
                         }
@@ -887,12 +947,22 @@ impl DocumentView {
                             let w = root.upcast::<gtk::Widget>();
                             w.child_focus(d);
                             
-                            // Sincroniza o destaque da linha com o novo foco da célula
+                            // Sincroniza o destaque da linha com o novo foco da
+                            // célula; com Shift, estende a seleção a partir da âncora.
                             let pos = li_key.position();
-                            if keyval == gdk::Key::Up && pos > 0 {
-                                me_key.selection.set_selected(pos - 1);
+                            let target = if keyval == gdk::Key::Up && pos > 0 {
+                                Some(pos - 1)
                             } else if keyval == gdk::Key::Down && pos + 1 < me_key.store.n_items() {
-                                me_key.selection.set_selected(pos + 1);
+                                Some(pos + 1)
+                            } else {
+                                None
+                            };
+                            if let Some(t) = target {
+                                if _state.contains(gdk::ModifierType::SHIFT_MASK) {
+                                    me_key.select_range_to(t);
+                                } else {
+                                    me_key.select_only(t);
+                                }
                             }
 
                             return glib::Propagation::Stop;
@@ -935,10 +1005,16 @@ impl DocumentView {
                             me_ctx.ctx_rowid.set(row.rowid());
                         }
                     }
-                    // seleciona a linha clicada para deixar claro o alvo da ação
+                    // Seleciona a linha clicada para deixar claro o alvo da ação.
+                    // Se ela já faz parte de uma seleção, a seleção é mantida
+                    // (Copiar/Excluir agem sobre todas as linhas selecionadas).
                     let pos = li_ctx.position();
                     if pos != gtk::INVALID_LIST_POSITION {
-                        me_ctx.selection.set_selected(pos);
+                        if me_ctx.selection.is_selected(pos) {
+                            *me_ctx.cursor.borrow_mut() = me_ctx.store.item(pos).and_downcast();
+                        } else {
+                            me_ctx.select_only(pos);
+                        }
                     }
                     me_ctx.ctx_col.set(col_idx);
                     if let Some(w) = g.widget() {
@@ -950,7 +1026,7 @@ impl DocumentView {
                             me_ctx.menu.set_pointing_to(Some(&rect));
                         }
                     }
-                    me_ctx.menu.popup();
+                    me_ctx.popup_ctx_menu();
                 });
                 label.add_controller(gesture);
 
@@ -972,13 +1048,24 @@ impl DocumentView {
                     if pos == gtk::INVALID_LIST_POSITION {
                         return;
                     }
-                    if me_sel.selection.selected() != pos {
-                        // 1º clique: seleciona e foca a célula, mas bloqueia a edição
-                        me_sel.selection.set_selected(pos);
-                        lbl.grab_focus();
-                        g.set_state(gtk::EventSequenceState::Claimed);
+                    let mods = g.current_event_state();
+                    if mods.contains(gdk::ModifierType::CONTROL_MASK) {
+                        // Ctrl+clique: marca/desmarca a linha, sem editar
+                        me_sel.toggle_row(pos);
+                    } else if mods.contains(gdk::ModifierType::SHIFT_MASK) {
+                        // Shift+clique: seleciona o intervalo desde a âncora
+                        me_sel.select_range_to(pos);
+                    } else if me_sel.cursor_pos() != pos || me_sel.selection.selection().size() != 1 {
+                        // 1º clique: seleciona só esta linha e foca a célula,
+                        // mas bloqueia a edição
+                        me_sel.select_only(pos);
+                    } else {
+                        // linha já selecionada sozinha: não reivindica →
+                        // o EditableLabel entra em edição
+                        return;
                     }
-                    // linha já selecionada: não reivindica → EditableLabel edita
+                    lbl.grab_focus();
+                    g.set_state(gtk::EventSequenceState::Claimed);
                 });
                 label.add_controller(sel_gesture);
 
@@ -1158,14 +1245,9 @@ impl DocumentView {
             },
             None => self.state.unsorted.borrow_mut().take().unwrap_or(rows),
         };
-        let selected = self.selection.selected_item().and_downcast::<RowObject>();
+        let selected = self.selected_rows();
         self.store.splice(0, n, &sorted);
-        if let Some(sel) = selected {
-            if let Some(pos) = sorted.iter().position(|r| *r == sel) {
-                self.selection.set_selected(pos as u32);
-                self.colview.scroll_to(pos as u32, None, gtk::ListScrollFlags::FOCUS, None);
-            }
-        }
+        self.restore_selection(&selected);
     }
 
     fn is_sorted(&self) -> bool {
@@ -1259,14 +1341,14 @@ impl DocumentView {
             return;
         }
         let cols = self.scope_cols();
-        let start = self.selection.selected();
+        let start = self.cursor_pos();
         let start = if start == gtk::INVALID_LIST_POSITION { 0 } else { start + 1 };
         for off in 0..n {
             let pos = (start + off) % n;
             if let Some(obj) = self.store.item(pos) {
                 let row = obj.downcast::<RowObject>().unwrap();
                 if cols.iter().any(|&c| m.matches(&row.value(c))) {
-                    self.selection.set_selected(pos);
+                    self.select_only(pos);
                     self.colview
                         .scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
                     return;
@@ -1310,7 +1392,7 @@ impl DocumentView {
         }
         let with = self.replace_entry.text().to_string();
         let cols = self.scope_cols();
-        let pos = self.selection.selected();
+        let pos = self.cursor_pos();
         if let Some(row) = self.store.item(pos).and_downcast::<RowObject>() {
             let reps = self.row_replacements(&row, &m, &with, &cols);
             if !reps.is_empty() {
@@ -1410,12 +1492,10 @@ impl DocumentView {
             }
         }
         if many {
-            let sel = self.selection.selected();
+            let selected = self.selected_rows();
             let n = self.store.n_items();
             self.store.items_changed(0, n, n);
-            if sel != gtk::INVALID_LIST_POSITION {
-                self.selection.set_selected(sel);
-            }
+            self.restore_selection(&selected);
         }
     }
 
@@ -1761,6 +1841,30 @@ impl DocumentView {
                 }
                 self.show_replacements(changed);
             }
+            Change::Batch(changes) => {
+                let mut added = Vec::new();
+                let mut removed = std::collections::HashSet::new();
+                let mut cells = Vec::new();
+                for c in changes {
+                    match c {
+                        Change::RowAdded { rowid } => added.push(rowid),
+                        Change::RowRemoved { rowid } => {
+                            removed.insert(rowid);
+                        }
+                        Change::Cell { rowid, column, value } => cells.push((rowid, column, value)),
+                        other => self.show_change(other),
+                    }
+                }
+                if !removed.is_empty() {
+                    self.show_rows_removed(&removed);
+                }
+                if !added.is_empty() {
+                    self.show_rows_added(&added);
+                }
+                if !cells.is_empty() {
+                    self.show_change(Change::Cells(cells));
+                }
+            }
             Change::RowAdded { rowid } => {
                 self.show_row_added(rowid);
                 if self.is_sorted() {
@@ -1865,7 +1969,7 @@ impl DocumentView {
     /// Seleciona e rola até a linha `rowid`, se ela estiver na visão.
     fn select_rowid(&self, rowid: i64) {
         if let Some(pos) = self.row_position(rowid) {
-            self.selection.set_selected(pos);
+            self.select_only(pos);
             self.colview.scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
         }
     }
@@ -1915,13 +2019,15 @@ impl DocumentView {
                 let at = if above { pos } else { pos + 1 };
                 self.store.insert(at, &obj);
                 self.refresh_status();
-                self.selection.set_selected(at);
+                self.select_only(at);
                 self.colview.scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
         }
     }
 
+    /// Exclui a linha clicada — ou, se ela faz parte de uma seleção, todas
+    /// as linhas selecionadas, num único passo de desfazer.
     fn ctx_delete_row(self: &Rc<Self>) {
         if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
@@ -1930,17 +2036,271 @@ impl DocumentView {
         if rid < 0 {
             return;
         }
-        match self.state.dp.delete_row(rid) {
+        let mut ids: Vec<i64> = self.selected_rows().iter().map(|r| r.rowid()).collect();
+        if !ids.contains(&rid) {
+            ids = vec![rid];
+        }
+        self.delete_rowids(&ids);
+    }
+
+    fn delete_rowids(self: &Rc<Self>, ids: &[i64]) {
+        let ids: Vec<i64> = ids.iter().copied().filter(|&r| r >= 0).collect();
+        if ids.is_empty() {
+            return;
+        }
+        match self.state.dp.delete_rows(&ids) {
             Ok(()) => {
                 self.mark_dirty();
-                // remove apenas a linha do store (sem re-consultar)
-                if let Some(pos) = self.row_position(rid) {
-                    self.store.remove(pos);
-                }
-                self.refresh_status();
+                self.show_rows_removed(&ids.into_iter().collect());
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
         }
+    }
+
+    // ---------- seleção ----------
+
+    /// Seleciona só a linha `pos`, que vira o cursor e a âncora do Shift.
+    fn select_only(&self, pos: u32) {
+        self.selection.select_item(pos, true);
+        let row = self.store.item(pos).and_downcast::<RowObject>();
+        *self.anchor.borrow_mut() = row.clone();
+        *self.cursor.borrow_mut() = row;
+    }
+
+    /// Shift: seleciona da âncora até `pos` (a âncora não muda).
+    fn select_range_to(&self, pos: u32) {
+        let anchor = self.anchor.borrow().as_ref().and_then(|r| self.store.find(r));
+        let Some(anchor) = anchor else {
+            self.select_only(pos);
+            return;
+        };
+        let (lo, hi) = (anchor.min(pos), anchor.max(pos));
+        self.selection.select_range(lo, hi - lo + 1, true);
+        *self.cursor.borrow_mut() = self.store.item(pos).and_downcast();
+    }
+
+    /// Ctrl: marca ou desmarca a linha `pos`, sem mexer no resto.
+    fn toggle_row(&self, pos: u32) {
+        if self.selection.is_selected(pos) {
+            self.selection.unselect_item(pos);
+        } else {
+            self.selection.select_item(pos, false);
+        }
+        let row = self.store.item(pos).and_downcast::<RowObject>();
+        *self.anchor.borrow_mut() = row.clone();
+        *self.cursor.borrow_mut() = row;
+    }
+
+    /// Posição do cursor na grade (`INVALID_LIST_POSITION` se não há).
+    fn cursor_pos(&self) -> u32 {
+        self.cursor
+            .borrow()
+            .as_ref()
+            .and_then(|r| self.store.find(r))
+            .unwrap_or(gtk::INVALID_LIST_POSITION)
+    }
+
+    /// Linhas selecionadas, na ordem da grade.
+    fn selected_rows(&self) -> Vec<RowObject> {
+        let set = self.selection.selection();
+        (0..set.size())
+            .filter_map(|i| self.store.item(set.nth(i as u32)).and_downcast::<RowObject>())
+            .collect()
+    }
+
+    /// Seleciona as linhas `rows` (onde estiverem agora) e rola até a
+    /// primeira; ela vira o cursor e a âncora.
+    fn select_rows(&self, rows: &[RowObject]) {
+        let wanted: std::collections::HashSet<&RowObject> = rows.iter().collect();
+        let set = gtk::Bitset::new_empty();
+        let mut first = None;
+        for i in 0..self.store.n_items() {
+            if let Some(r) = self.store.item(i).and_downcast::<RowObject>() {
+                if wanted.contains(&r) {
+                    set.add(i);
+                    first.get_or_insert(i);
+                }
+            }
+        }
+        let n = self.store.n_items();
+        self.selection.set_selection(&set, &gtk::Bitset::new_range(0, n));
+        if let Some(p) = first {
+            let row = self.store.item(p).and_downcast::<RowObject>();
+            *self.anchor.borrow_mut() = row.clone();
+            *self.cursor.borrow_mut() = row;
+            self.colview.scroll_to(p, None, gtk::ListScrollFlags::FOCUS, None);
+        }
+    }
+
+    /// Depois de reordenar o store: seleciona de novo as mesmas linhas e
+    /// mantém o cursor à vista, sem mudar cursor e âncora.
+    fn restore_selection(&self, rows: &[RowObject]) {
+        let (cursor, anchor) = (self.cursor.borrow().clone(), self.anchor.borrow().clone());
+        self.select_rows(rows);
+        *self.cursor.borrow_mut() = cursor;
+        *self.anchor.borrow_mut() = anchor;
+        let pos = self.cursor_pos();
+        if pos != gtk::INVALID_LIST_POSITION {
+            self.colview.scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
+        }
+    }
+
+    // ---------- copiar / colar ----------
+
+    /// Copia as linhas selecionadas para a área de transferência como XML
+    /// (`<ROW .../>`, uma por linha de texto). Devolve quantas copiou.
+    fn copy_rows(&self) -> usize {
+        let rows = self.selected_rows();
+        if rows.is_empty() {
+            return 0;
+        }
+        let names = self.state.columns.borrow().clone();
+        let values: Vec<Vec<String>> =
+            rows.iter().map(|r| (0..names.len()).map(|c| r.value(c)).collect()).collect();
+        self.root.clipboard().set_text(&rowclip::rows_to_xml(&names, &values));
+        self.status.set_text(&format!("{} {}", rows.len(), tr("rows_copied")));
+        rows.len()
+    }
+
+    /// Recortar: copia e exclui as linhas selecionadas.
+    fn cut_rows(self: &Rc<Self>) {
+        if !*self.state.editable.borrow() || self.state.loading.get() {
+            self.status.set_text(tr("paste_readonly"));
+            return;
+        }
+        let ids: Vec<i64> = self.selected_rows().iter().map(|r| r.rowid()).collect();
+        if self.copy_rows() > 0 {
+            self.delete_rowids(&ids);
+            self.status.set_text(&format!("{} {}", ids.len(), tr("rows_cut")));
+        }
+    }
+
+    /// Cola as linhas da área de transferência acima/abaixo da linha
+    /// `ref_rowid` (ou no fim, sem referência).
+    fn paste_rows(self: &Rc<Self>, ref_rowid: Option<i64>, above: bool) {
+        if !*self.state.editable.borrow() || self.state.loading.get() || self.busy.get() {
+            self.status.set_text(tr("paste_readonly"));
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        self.root.clipboard().read_text_async(gio::Cancellable::NONE, move |res| {
+            let Some(me) = weak.upgrade() else { return };
+            let text = res.ok().flatten().map(|t| t.to_string()).unwrap_or_default();
+            match rowclip::parse_rows(&text) {
+                Some(rows) => me.insert_pasted(ref_rowid.filter(|r| *r >= 0), above, &rows),
+                None => me.status.set_text(tr("paste_nothing")),
+            }
+        });
+    }
+
+    fn insert_pasted(self: &Rc<Self>, ref_rowid: Option<i64>, above: bool, rows: &[Vec<(String, String)>]) {
+        let (created, ignored) = match self.state.dp.insert_rows(ref_rowid, above, rows) {
+            Ok(r) => r,
+            Err(e) => {
+                self.error(&format!("{}\n{e}", tr("error")));
+                return;
+            }
+        };
+        let objs: Vec<RowObject> =
+            created.into_iter().map(|(rid, vals)| RowObject::new(rid, vals, true)).collect();
+        let at = ref_rowid
+            .and_then(|r| self.row_position(r))
+            .map(|p| if above { p } else { p + 1 })
+            .unwrap_or(self.store.n_items());
+        self.store.splice(at, 0, &objs);
+        if self.is_sorted() {
+            self.sort_store();
+        }
+        self.select_rows(&objs);
+        self.mark_dirty();
+        let mut msg = format!("{} {}", objs.len(), tr("rows_pasted"));
+        if !ignored.is_empty() {
+            msg.push_str(&format!("  ·  {}: {}", tr("paste_ignored"), ignored.join(", ")));
+        }
+        self.status.set_text(&msg);
+    }
+
+    /// Abre o menu de contexto das células. Antes, confere se a área de
+    /// transferência tem linhas para mostrar (ou não) o submenu Colar.
+    fn popup_ctx_menu(self: &Rc<Self>) {
+        if !*self.state.editable.borrow() {
+            self.paste_section.remove_all();
+            self.menu.popup();
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        self.root.clipboard().read_text_async(gio::Cancellable::NONE, move |res| {
+            let Some(me) = weak.upgrade() else { return };
+            let has_rows = res.ok().flatten().is_some_and(|t| t.contains("<ROW"));
+            me.paste_section.remove_all();
+            if has_rows {
+                let sub = gio::Menu::new();
+                sub.append(Some(tr("ctx_paste_above")), Some("doc.paste-above"));
+                sub.append(Some(tr("ctx_paste_below")), Some("doc.paste-below"));
+                me.paste_section.append_submenu(Some(tr("ctx_paste")), &sub);
+            }
+            me.menu.popup();
+        });
+    }
+
+    /// Tira da grade as linhas `ids`. Muitas de uma vez viram uma única troca
+    /// do conteúdo do store.
+    fn show_rows_removed(&self, ids: &std::collections::HashSet<i64>) {
+        if ids.len() <= 20 {
+            for id in ids {
+                if let Some(pos) = self.row_position(*id) {
+                    self.store.remove(pos);
+                }
+            }
+        } else {
+            let n = self.store.n_items();
+            let kept: Vec<RowObject> = (0..n)
+                .filter_map(|i| self.store.item(i).and_downcast::<RowObject>())
+                .filter(|r| !ids.contains(&r.rowid()))
+                .collect();
+            self.store.splice(0, n, &kept);
+        }
+        self.refresh_status();
+    }
+
+    /// Recoloca na grade várias linhas restauradas (desfazer exclusão,
+    /// refazer colagem), cada uma na sua posição do documento.
+    fn show_rows_added(self: &Rc<Self>, ids: &[i64]) {
+        let filter = self.state.last_filter.borrow().clone();
+        let vis = match self.state.dp.visible_rows(ids, &filter) {
+            Ok(v) => v,
+            Err(e) => {
+                self.error(&format!("{}\n{e}", tr("error")));
+                return;
+            }
+        };
+        if vis.is_empty() {
+            return;
+        }
+        let new: Vec<RowObject> =
+            vis.into_iter().map(|(rid, vals)| RowObject::new(rid, vals, true)).collect();
+        let n = self.store.n_items();
+        if self.is_sorted() {
+            self.store.splice(n, 0, &new);
+            self.sort_store();
+        } else {
+            // Intercala pelas posições do documento numa única troca.
+            let ord = match self.state.dp.row_orders() {
+                Ok(o) => o,
+                Err(e) => {
+                    self.error(&format!("{}\n{e}", tr("error")));
+                    return;
+                }
+            };
+            let mut all: Vec<RowObject> =
+                (0..n).filter_map(|i| self.store.item(i).and_downcast::<RowObject>()).collect();
+            all.extend(new.iter().cloned());
+            let key = |r: &RowObject| ord.get(&r.rowid()).copied().unwrap_or(f64::MAX);
+            all.sort_by(|a, b| key(a).total_cmp(&key(b)));
+            self.store.splice(0, n, &all);
+        }
+        self.select_rows(&new);
+        self.refresh_status();
     }
 
     fn ctx_clone_row(self: &Rc<Self>, above: bool) {
@@ -1959,7 +2319,7 @@ impl DocumentView {
                 let at = if above { pos } else { pos + 1 };
                 self.store.insert(at, &obj);
                 self.refresh_status();
-                self.selection.set_selected(at);
+                self.select_only(at);
                 self.colview.scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
@@ -1991,7 +2351,7 @@ impl DocumentView {
                 if let Some(obj) = self.store.item(pos) {
                     self.store.remove(pos);
                     self.store.insert(target, &obj);
-                    self.selection.set_selected(target);
+                    self.select_only(target);
                     self.colview
                         .scroll_to(target, None, gtk::ListScrollFlags::FOCUS, None);
                 }

@@ -7,6 +7,7 @@ Este guia descreve o comportamento da versão 0.5.4 do Lê-XML.
 - [Abrir ou criar documentos](#abrir-ou-criar-documentos)
 - [Modos de visualização](#modos-de-visualização)
 - [Trabalhar com a tabela](#trabalhar-com-a-tabela)
+- [Selecionar, copiar e colar linhas](#selecionar-copiar-e-colar-linhas)
 - [Desfazer e refazer](#desfazer-e-refazer)
 - [Ordenar por uma coluna](#ordenar-por-uma-coluna)
 - [Localizar valores](#localizar-valores)
@@ -131,11 +132,14 @@ o alvo das ações.
 
 No submenu **Linha**:
 
+- **Copiar linha(s)** copia as linhas selecionadas (veja
+  [Selecionar, copiar e colar linhas](#selecionar-copiar-e-colar-linhas));
 - **Nova linha acima** ou **Nova linha abaixo** cria uma linha vazia;
 - **Clonar para cima** ou **Clonar para baixo** copia a linha e a posiciona ao
   lado da original;
 - **Mover para cima** ou **Mover para baixo** troca a linha com sua vizinha;
-- **Excluir linha** remove a linha.
+- **Excluir linha(s)** remove a linha — ou, se ela faz parte de uma seleção,
+  todas as linhas selecionadas, num único passo de desfazer.
 
 No submenu **Coluna**:
 
@@ -164,6 +168,53 @@ XML inválido na gravação. A mesma regra vale para **Adicionar coluna**.
 
 Operações de edição e estrutura ficam desabilitadas enquanto uma consulta SQL
 livre está sendo exibida.
+
+## Selecionar, copiar e colar linhas
+
+### Selecionar
+
+- clique numa célula para selecionar só aquela linha;
+- `Ctrl`+clique marca ou desmarca linhas soltas;
+- `Shift`+clique seleciona o intervalo desde a última linha clicada;
+- `Shift+↑` e `Shift+↓` estendem a seleção pelo teclado;
+- `Ctrl+A` seleciona todas as linhas visíveis.
+
+O rodapé mostra quantas linhas estão selecionadas. Clicar na área vazia
+abaixo da última linha limpa a seleção.
+
+### Copiar, recortar e colar
+
+| Ação | Atalho | Menu |
+| --- | --- | --- |
+| Copiar as linhas selecionadas | `Ctrl+C` | **Linha → Copiar linha(s)** |
+| Recortar (copiar e excluir) | `Ctrl+X` | — |
+| Colar abaixo da linha atual | `Ctrl+V` | **Colar → Colar abaixo** |
+| Colar acima da linha clicada | — | **Colar → Colar acima** |
+
+As linhas vão para a área de transferência no mesmo formato do arquivo, um
+elemento `<ROW .../>` por linha:
+
+```xml
+<ROW id="1" nome="carlos" valor="1.234,56" data="01/02/2024"/>
+<ROW id="2" nome="Ana" valor="9" data="31/01/2024"/>
+```
+
+Por isso é possível colar:
+
+- em outra janela do Lê-XML, inclusive com outro arquivo aberto;
+- num editor de texto, onde as linhas aparecem como XML;
+- de volta no Lê-XML a partir de um editor de texto ou de um trecho de
+  arquivo `DATAPACKET`.
+
+Ao colar, cada atributo vai para a coluna de mesmo nome. Atributos sem coluna
+correspondente são ignorados e listados no rodapé; colunas que não aparecem na
+linha colada ficam vazias. As linhas coladas ficam selecionadas, e um único
+`Ctrl+Z` desfaz a colagem inteira.
+
+O submenu **Colar** só aparece no botão direito quando a área de
+transferência tem linhas `<ROW>`. Enquanto uma célula está em edição, `Ctrl+C`
+e `Ctrl+V` copiam e colam apenas o texto dela. No resultado de uma consulta
+SQL livre é possível copiar, mas não colar nem recortar.
 
 ## Desfazer e refazer
 
@@ -417,6 +468,10 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 | --- | --- |
 | Salvar | `Ctrl+S` |
 | Salvar como | `Ctrl+Shift+S` |
+| Selecionar todas as linhas | `Ctrl+A` |
+| Copiar / recortar / colar linhas | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
+| Estender a seleção | `Shift+↑` / `Shift+↓`, `Shift`+clique |
+| Marcar linhas soltas | `Ctrl`+clique |
 | Desfazer | `Ctrl+Z` |
 | Refazer | `Ctrl+Shift+Z` ou `Ctrl+Y` |
 | Ir para Localizar | `Ctrl+F` |
