@@ -177,6 +177,9 @@ livre está sendo exibida.
 - clique numa célula para selecionar só aquela linha;
 - `Ctrl`+clique marca ou desmarca linhas soltas;
 - `Shift`+clique seleciona o intervalo desde a última linha clicada;
+- arrastar o mouse com o botão pressionado seleciona as linhas do ponto de
+  partida até a linha sob o ponteiro; perto da borda de cima ou de baixo, a
+  tabela rola sozinha e a seleção acompanha;
 - `Shift+↑` e `Shift+↓` estendem a seleção pelo teclado;
 - `Ctrl+A` seleciona todas as linhas visíveis.
 

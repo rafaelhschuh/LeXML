@@ -54,6 +54,9 @@ pub struct DocumentView {
     // e o widget de célula que está com a classe agora.
     cur_cell: RefCell<Option<(RowObject, usize)>>,
     cur_widget: RefCell<Option<gtk::Widget>>,
+    // Widget de cada célula → seu ListItem, para achar a linha sob o
+    // ponteiro ao arrastar a seleção.
+    cell_items: RefCell<std::collections::HashMap<gtk::Widget, glib::WeakRef<gtk::ListItem>>>,
     anchor: RefCell<Option<RowObject>>,
     // Seção do menu de contexto com "Colar", preenchida só quando a área de
     // transferência tem linhas.
@@ -367,6 +370,7 @@ impl DocumentView {
             cursor: RefCell::new(None),
             cur_cell: RefCell::new(None),
             cur_widget: RefCell::new(None),
+            cell_items: RefCell::default(),
             anchor: RefCell::new(None),
             paste_section,
             sel_label,
@@ -567,6 +571,7 @@ impl DocumentView {
 
         *me.weak_self.borrow_mut() = Rc::downgrade(&me);
         me.close_menus_on_outside_click();
+        me.arm_drag_select();
 
         // A carga inicial (completa) é disparada por quem cria a view
         // (`load_initial`/`load_blank`), fora da thread de UI e em blocos.
@@ -1039,6 +1044,12 @@ impl DocumentView {
                     me.set_current_cell(&f.widget().unwrap(), row, col_idx);
                 });
                 label.add_controller(focus);
+
+                if let Some(me) = me.upgrade() {
+                    me.cell_items
+                        .borrow_mut()
+                        .insert(label.clone().upcast(), list_item.downgrade());
+                }
 
                 // menu de contexto (botão direito) sensível à linha/coluna
                 let me_ctx = me.clone();
@@ -2215,6 +2226,125 @@ impl DocumentView {
         }
     }
 
+    /// Célula sob o ponto `(x, y)` da tabela: posição da linha no store e o
+    /// widget da célula.
+    fn cell_at(&self, x: f64, y: f64) -> Option<(u32, gtk::Widget)> {
+        let mut w = self.colview.pick(x, y, gtk::PickFlags::DEFAULT);
+        let items = self.cell_items.borrow();
+        while let Some(cur) = w {
+            if let Some(li) = items.get(&cur).and_then(|li| li.upgrade()) {
+                let pos = li.position();
+                return (pos != gtk::INVALID_LIST_POSITION).then_some((pos, cur));
+            }
+            w = cur.parent();
+        }
+        None
+    }
+
+    /// Linha (posição no store) sob o ponto `(x, y)` da tabela.
+    fn row_at(&self, x: f64, y: f64) -> Option<u32> {
+        self.cell_at(x, y).map(|(pos, _)| pos)
+    }
+
+    /// Arrastar com o botão esquerdo seleciona as linhas do ponto de partida
+    /// até a linha sob o ponteiro. Com o ponteiro parado perto da borda de
+    /// cima ou de baixo, a tabela continua rolando e a seleção acompanha.
+    /// Enquanto o ponteiro fica na linha de origem nada muda — aí o arrasto
+    /// continua sendo do texto da célula em edição, se houver uma.
+    fn arm_drag_select(self: &Rc<Self>) {
+        let drag = gtk::GestureDrag::new();
+        drag.set_button(gdk::BUTTON_PRIMARY);
+        drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let st = Rc::new(DragSelect::default());
+
+        let weak = Rc::downgrade(self);
+        let s1 = st.clone();
+        drag.connect_drag_begin(move |_, x, y| {
+            s1.active.set(false);
+            s1.start.set(weak.upgrade().and_then(|me| me.row_at(x, y)));
+            s1.last.set((x, y));
+        });
+
+        let weak = Rc::downgrade(self);
+        let s2 = st.clone();
+        drag.connect_drag_update(move |g, dx, dy| {
+            let Some(me) = weak.upgrade() else { return };
+            let Some((sx, sy)) = g.start_point() else { return };
+            s2.last.set((sx + dx, sy + dy));
+            if !s2.active.get() {
+                let Some(from) = s2.start.get() else { return };
+                let (x, y) = s2.last.get();
+                match me.row_at(x, y) {
+                    Some(to) if to != from => {}
+                    _ => return, // ainda na linha de origem
+                }
+                // Passou para outra linha: o arrasto é de seleção. Toma o
+                // evento para si (o texto da célula não é mais arrastado) e
+                // encerra uma edição que tenha começado no clique.
+                s2.active.set(true);
+                g.set_state(gtk::EventSequenceState::Claimed);
+                me.commit_pending_edit();
+                *me.anchor.borrow_mut() = me.store.item(from).and_downcast();
+            }
+            me.drag_select_step(&s2);
+            // Perto da borda, um temporizador continua rolando mesmo com o
+            // ponteiro parado.
+            if !s2.ticking.get() {
+                s2.ticking.set(true);
+                let weak = Rc::downgrade(&me);
+                let s3 = s2.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+                    let Some(me) = weak.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    if !s3.active.get() || !me.drag_select_step(&s3) {
+                        s3.ticking.set(false);
+                        return glib::ControlFlow::Break;
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
+        });
+
+        drag.connect_drag_end(move |_, _, _| st.active.set(false));
+        self.colview.add_controller(drag);
+    }
+
+    /// Um passo da seleção por arrasto: rola se o ponteiro está perto de uma
+    /// borda e seleciona da linha de origem até a linha sob o ponteiro.
+    /// Devolve `true` se rolou (o temporizador deve continuar).
+    fn drag_select_step(&self, st: &DragSelect) -> bool {
+        let Some(from) = st.start.get() else { return false };
+        let (x, y) = st.last.get();
+        const HEADER: f64 = 30.0;
+        const EDGE: f64 = 24.0;
+        let h = f64::from(self.colview.height());
+        let mut scrolled = false;
+        if let Some(adj) = self.colview.vadjustment() {
+            // quanto mais longe da borda, mais rápido
+            let speed = |d: f64| (d / EDGE).clamp(0.3, 4.0) * adj.step_increment().max(12.0);
+            let before = adj.value();
+            if y < HEADER + EDGE {
+                adj.set_value(before - speed(HEADER + EDGE - y));
+            } else if y > h - EDGE {
+                adj.set_value(before + speed(y - (h - EDGE)));
+            }
+            scrolled = adj.value() != before;
+        }
+        let probe = y.clamp(HEADER + 2.0, (h - 2.0).max(HEADER + 2.0));
+        if let Some((to, cell)) = self.cell_at(x, probe) {
+            let (lo, hi) = (from.min(to), from.max(to));
+            self.selection.select_range(lo, hi - lo + 1, true);
+            *self.cursor.borrow_mut() = self.store.item(to).and_downcast();
+            // O contorno (e o foco do teclado) acompanha a célula sob o
+            // ponteiro, junto com o destaque das linhas.
+            if !cell.has_focus() {
+                cell.grab_focus();
+            }
+        }
+        scrolled
+    }
+
     /// Fecha os menus de contexto quando há um clique fora deles, sem
     /// consumir o clique: ele segue para onde foi dado. Assim o botão direito
     /// em outra célula já abre o menu dela, e o esquerdo já seleciona.
@@ -2657,6 +2787,19 @@ impl DocumentView {
             Err(e) => self.error(&format!("{}\n{e}", tr("sum_failed"))),
         }
     }
+}
+
+/// Estado da seleção por arrasto (ver `DocumentView::arm_drag_select`).
+#[derive(Default)]
+struct DragSelect {
+    /// Linha onde o arrasto começou (`None` fora das linhas: cabeçalho etc.).
+    start: Cell<Option<u32>>,
+    /// O arrasto já virou seleção de linhas.
+    active: Cell<bool>,
+    /// Última posição do ponteiro, na tabela.
+    last: Cell<(f64, f64)>,
+    /// Há um temporizador de rolagem rodando.
+    ticking: Cell<bool>,
 }
 
 /// Popovers de submenu dentro de `w`. No modo NESTED o PopoverMenu cria um
