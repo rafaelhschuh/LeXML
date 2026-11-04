@@ -50,6 +50,10 @@ pub struct DocumentView {
     // Shift+clique/Shift+seta. Guardadas como objeto, e não posição, para
     // continuarem certas depois de inserções e exclusões acima delas.
     cursor: RefCell<Option<RowObject>>,
+    // Célula atual (linha, coluna), destacada com a classe `cell-current`,
+    // e o widget de célula que está com a classe agora.
+    cur_cell: RefCell<Option<(RowObject, usize)>>,
+    cur_widget: RefCell<Option<gtk::Widget>>,
     anchor: RefCell<Option<RowObject>>,
     // Seção do menu de contexto com "Colar", preenchida só quando a área de
     // transferência tem linhas.
@@ -235,6 +239,7 @@ impl DocumentView {
             // evitando que a barra horizontal cubra a última linha.
             .overlay_scrolling(false)
             .build();
+        scroller.add_css_class("data-scroller");
         scroller.set_child(Some(&colview));
 
         // Camada sobre a tabela para operações longas: escurece a grade,
@@ -331,6 +336,10 @@ impl DocumentView {
         let menu = gtk::PopoverMenu::from_model_full(&menu_model, gtk::PopoverMenuFlags::NESTED);
         menu.set_parent(&colview);
         menu.set_has_arrow(false);
+        // Sem autohide: um popover com autohide consome o clique que o fecha,
+        // e clicar em outra célula exigiria um segundo clique. O fechamento
+        // por clique fora é feito por `close_menus_on_outside_click`.
+        menu.set_autohide(false);
         menu.set_halign(gtk::Align::Start);
 
         // Menu do cabeçalho: ações da coluna e, numa seção à parte, Somar —
@@ -347,6 +356,7 @@ impl DocumentView {
         let header_menu = gtk::PopoverMenu::from_model(Some(&header_model));
         header_menu.set_parent(&colview);
         header_menu.set_has_arrow(false);
+        header_menu.set_autohide(false);
         header_menu.set_halign(gtk::Align::Start);
 
         let me = Rc::new(Self {
@@ -355,6 +365,8 @@ impl DocumentView {
             store,
             selection,
             cursor: RefCell::new(None),
+            cur_cell: RefCell::new(None),
+            cur_widget: RefCell::new(None),
             anchor: RefCell::new(None),
             paste_section,
             sel_label,
@@ -428,6 +440,13 @@ impl DocumentView {
         save_keys.connect_key_pressed(move |_, keyval, _code, state| {
             // Durante uma operação longa o teclado fica bloqueado: salvar ou
             // desfazer no meio dela deixaria o documento pela metade.
+            // Esc fecha o menu de contexto (sem autohide ele não fecha sozinho
+            // quando o foco do teclado continua na tabela).
+            if keyval == gdk::Key::Escape && (me_keys.menu.is_visible() || me_keys.header_menu.is_visible()) {
+                close_menu(me_keys.menu.upcast_ref());
+                close_menu(me_keys.header_menu.upcast_ref());
+                return glib::Propagation::Stop;
+            }
             if me_keys.busy.get() {
                 return glib::Propagation::Stop;
             }
@@ -547,6 +566,7 @@ impl DocumentView {
         }));
 
         *me.weak_self.borrow_mut() = Rc::downgrade(&me);
+        me.close_menus_on_outside_click();
 
         // A carga inicial (completa) é disparada por quem cria a view
         // (`load_initial`/`load_blank`), fora da thread de UI e em blocos.
@@ -1009,6 +1029,17 @@ impl DocumentView {
                 });
                 label.add_controller(key_ctrl);
 
+                // A célula que recebe o foco vira a célula atual.
+                let me_focus = me.clone();
+                let li_focus = list_item.clone();
+                let focus = gtk::EventControllerFocus::new();
+                focus.connect_enter(move |f| {
+                    let Some(me) = me_focus.upgrade() else { return };
+                    let Some(row) = li_focus.item().and_downcast::<RowObject>() else { return };
+                    me.set_current_cell(&f.widget().unwrap(), row, col_idx);
+                });
+                label.add_controller(focus);
+
                 // menu de contexto (botão direito) sensível à linha/coluna
                 let me_ctx = me.clone();
                 let li_ctx = list_item.clone();
@@ -1045,6 +1076,12 @@ impl DocumentView {
                             let rect = gdk::Rectangle::new(p.x() as i32, p.y() as i32, 1, 1);
                             me_ctx.menu.set_pointing_to(Some(&rect));
                         }
+                    }
+                    // Leva o foco (e o contorno de destaque) para a célula
+                    // clicada: ao fechar o menu, o foco volta para ela, e não
+                    // para a célula de outra linha que estava focada antes.
+                    if let Some(w) = g.widget() {
+                        w.grab_focus();
                     }
                     me_ctx.popup_ctx_menu();
                 });
@@ -1130,10 +1167,28 @@ impl DocumentView {
                     .map_or(false, |m| *m.state.editable.borrow())
                     && row.editable();
                 label.set_editable(editable);
+                // As células são recicladas ao rolar: o destaque segue a
+                // linha/coluna atual, não o widget.
+                if let (Some(me), Some(cell)) = (me_bind.upgrade(), label.parent()) {
+                    let is_cur = me
+                        .cur_cell
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|(r, c)| *r == row && *c == col_idx);
+                    if is_cur {
+                        cell.add_css_class("cell-current");
+                        *me.cur_widget.borrow_mut() = Some(cell);
+                    } else {
+                        cell.remove_css_class("cell-current");
+                    }
+                }
             });
 
             let column = gtk::ColumnViewColumn::new(Some(name), Some(factory));
             column.set_resizable(true);
+            // As colunas dividem a largura da janela; com muitas colunas, a
+            // tabela continua rolando na horizontal.
+            column.set_expand(true);
             self.colview.append_column(&column);
         }
 
@@ -1191,7 +1246,7 @@ impl DocumentView {
                 let rect = gdk::Rectangle::new(p.x() as i32, p.y() as i32, 1, 1);
                 me.header_menu.set_pointing_to(Some(&rect));
             }
-            me.header_menu.popup();
+            open_menu(me.header_menu.upcast_ref());
         });
         title.add_controller(right);
     }
@@ -2160,6 +2215,54 @@ impl DocumentView {
         }
     }
 
+    /// Fecha os menus de contexto quando há um clique fora deles, sem
+    /// consumir o clique: ele segue para onde foi dado. Assim o botão direito
+    /// em outra célula já abre o menu dela, e o esquerdo já seleciona.
+    fn close_menus_on_outside_click(self: &Rc<Self>) {
+        let attached = Rc::new(Cell::new(false));
+        let weak = Rc::downgrade(self);
+        // O controlador vai na janela (pega também cliques no cabeçalho dela),
+        // que só existe depois que a view é colocada nela.
+        self.root.connect_map(move |root| {
+            if attached.get() {
+                return;
+            }
+            let Some(win) = root.root() else { return };
+            attached.set(true);
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(0); // qualquer botão
+            gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let weak = weak.clone();
+            gesture.connect_pressed(move |g, _, _, _| {
+                let Some(me) = weak.upgrade() else { return };
+                if !me.menu.is_visible() && !me.header_menu.is_visible() {
+                    return;
+                }
+                // Cliques dentro do menu (e dos submenus) chegam de outra
+                // superfície; só os da superfície da janela estão fora dele.
+                let clicked = g.current_event().and_then(|e| e.surface());
+                let window = g.widget().and_then(|w| w.native()).and_then(|n| n.surface());
+                if clicked.is_some() && clicked == window {
+                    close_menu(me.menu.upcast_ref());
+                    close_menu(me.header_menu.upcast_ref());
+                }
+            });
+            win.add_controller(gesture);
+        });
+    }
+
+    /// Marca a célula de `label` como a atual: só ela leva o contorno.
+    fn set_current_cell(&self, label: &gtk::Widget, row: RowObject, col: usize) {
+        if let Some(old) = self.cur_widget.borrow_mut().take() {
+            old.remove_css_class("cell-current");
+        }
+        if let Some(cell) = label.parent() {
+            cell.add_css_class("cell-current");
+            *self.cur_widget.borrow_mut() = Some(cell);
+        }
+        *self.cur_cell.borrow_mut() = Some((row, col));
+    }
+
     // ---------- seleção ----------
 
     /// Seleciona só a linha `pos`, que vira o cursor e a âncora do Shift.
@@ -2328,7 +2431,7 @@ impl DocumentView {
     fn popup_ctx_menu(self: &Rc<Self>) {
         if !*self.state.editable.borrow() {
             self.paste_section.remove_all();
-            self.menu.popup();
+            open_menu(self.menu.upcast_ref());
             return;
         }
         let weak = Rc::downgrade(self);
@@ -2342,7 +2445,7 @@ impl DocumentView {
                 sub.append(Some(tr("ctx_paste_below")), Some("doc.paste-below"));
                 me.paste_section.append_submenu(Some(tr("ctx_paste")), &sub);
             }
-            me.menu.popup();
+            open_menu(me.menu.upcast_ref());
         });
     }
 
@@ -2554,6 +2657,42 @@ impl DocumentView {
             Err(e) => self.error(&format!("{}\n{e}", tr("sum_failed"))),
         }
     }
+}
+
+/// Popovers de submenu dentro de `w`. No modo NESTED o PopoverMenu cria um
+/// popover por submenu, como filho do item que o abre.
+fn sub_popovers(w: &gtk::Widget, out: &mut Vec<gtk::Popover>) {
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Ok(p) = c.clone().downcast::<gtk::Popover>() {
+            out.push(p);
+        }
+        sub_popovers(&c, out);
+        child = c.next_sibling();
+    }
+}
+
+/// Abre um menu de contexto. Os submenus também ficam sem autohide: com ele,
+/// um submenu aberto engoliria o clique em outra célula (ver
+/// `close_menus_on_outside_click`). Refeito a cada abertura porque o
+/// submenu Colar é recriado conforme a área de transferência.
+fn open_menu(menu: &gtk::Popover) {
+    let mut subs = Vec::new();
+    sub_popovers(menu.upcast_ref(), &mut subs);
+    for p in subs {
+        p.set_autohide(false);
+    }
+    menu.popup();
+}
+
+/// Fecha um menu de contexto e os submenus que estiverem abertos.
+fn close_menu(menu: &gtk::Popover) {
+    let mut subs = Vec::new();
+    sub_popovers(menu.upcast_ref(), &mut subs);
+    for p in subs {
+        p.popdown();
+    }
+    menu.popdown();
 }
 
 /// Coleta, na ordem das colunas, os widgets de título do cabeçalho

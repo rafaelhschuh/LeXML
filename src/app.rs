@@ -1070,8 +1070,10 @@ pub fn run() -> glib::ExitCode {
             columnview > listview > row:selected cell {
                 background-color: transparent;
             }
-            /* Destaque mais forte na célula que contém o foco. */
-            columnview cell:focus-within {
+            /* Destaque mais forte na célula atual. Vem de uma classe, e não
+               de :focus-within, para continuar visível com o menu de
+               contexto aberto ou o foco em outro lugar da janela. */
+            columnview cell.cell-current {
                 outline: 2px solid @accent_bg_color;
                 outline-offset: -2px;
                 background-color: alpha(@accent_bg_color, 0.15);
@@ -1105,6 +1107,13 @@ pub fn run() -> glib::ExitCode {
             /* Remove o contorno de foco quadrado desenhado ao navegar
                por teclado; o fundo arredondado do :selected já indica
                a linha ativa. */
+            /* Sem o brilho persistente na borda direita da tabela (o de
+               baixo, que indica mais linhas, continua). */
+            scrolledwindow.data-scroller > overshoot.right,
+            scrolledwindow.data-scroller > undershoot.right {
+                background: none;
+                box-shadow: none;
+            }
             /* Camada de andamento sobre a tabela (operações longas). */
             .busy-shade {
                 background-color: alpha(@window_bg_color, 0.6);
