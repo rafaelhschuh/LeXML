@@ -1,9 +1,11 @@
-//! Diferença, linha a linha, entre duas versões de uma tabela (arquivo em
-//! disco, cópia de recuperação, versão do histórico ou o documento aberto).
-//! Cada linha da tabela vira o seu `<ROW .../>`, e as duas listas são
-//! comparadas como texto.
+//! Diferença entre duas versões de uma tabela (arquivo em disco, cópia de
+//! recuperação, versão do histórico ou o documento aberto), célula a célula.
+//!
+//! As linhas são casadas pelas colunas que existem nos dois lados; uma linha
+//! apagada seguida de uma incluída parecida vira uma linha alterada, com as
+//! células que mudaram marcadas. Coluna incluída ou apagada aparece à parte,
+//! sem contar como mudança em todas as linhas.
 
-use crate::rowclip::rows_to_xml;
 use crate::xmldoc::XmlDoc;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -14,17 +16,35 @@ pub enum Tag {
     Same,
     Added,
     Removed,
-    /// Trecho igual recolhido: o texto diz quantas linhas.
+    /// Mesma linha com células diferentes: `old` tem os valores de antes.
+    Changed,
+    /// Trecho igual recolhido: o primeiro valor diz quantas linhas.
     Gap,
 }
 
+/// Situação de uma coluna entre as duas versões.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColState {
+    Same,
+    Added,
+    Removed,
+}
+
+pub struct DiffRow {
+    pub tag: Tag,
+    /// Valores na ordem de `Diff::columns`.
+    pub values: Vec<String>,
+    /// Em `Changed`, os valores de antes; vazio nos outros casos.
+    pub old: Vec<String>,
+}
+
 pub struct Diff {
-    pub columns_before: Vec<String>,
-    pub columns_after: Vec<String>,
+    pub columns: Vec<(String, ColState)>,
+    pub rows: Vec<DiffRow>,
     pub added: usize,
     pub removed: usize,
-    pub lines: Vec<(Tag, String)>,
-    /// A lista de linhas foi cortada em `MAX_LINES`.
+    pub changed: usize,
+    /// A lista foi cortada em `MAX_LINES`.
     pub truncated: bool,
 }
 
@@ -36,50 +56,149 @@ const MAX_LINES: usize = 20_000;
 /// ficaria lenta demais; usa-se a comparação por conteúdo.
 const LCS_LIMIT: usize = 4_000_000;
 
-/// Uma linha de texto por linha da tabela. `rows` vem de `XmlDoc::filter`,
-/// cuja primeira coluna é o rowid interno.
-pub fn lines_of(names: &[String], rows: &[Vec<String>]) -> Vec<String> {
-    rows.iter()
-        .map(|r| rows_to_xml(names, &[r[1..].to_vec()]).trim_end().to_string())
-        .collect()
+/// Uma tabela como `XmlDoc::filter` a devolve: nomes das colunas e linhas,
+/// cada uma com o rowid interno na frente.
+pub struct Table {
+    pub names: Vec<String>,
+    pub rows: Vec<Vec<String>>,
 }
 
-fn row_lines(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let dp = XmlDoc::open(path)?;
-    let names = dp.field_names();
-    let res = dp.filter(None)?;
-    let lines = lines_of(&names, &res.rows);
-    Ok((names, lines))
+impl Table {
+    fn open(path: &Path) -> Result<Self> {
+        let dp = XmlDoc::open(path)?;
+        let names = dp.field_names();
+        let rows = dp.filter(None)?.rows;
+        Ok(Self { names, rows })
+    }
+
+    /// Posição, em cada linha, de cada coluna de `cols` (`None` se a
+    /// tabela não tem a coluna). Calculada uma vez por comparação.
+    fn index(&self, cols: &[String]) -> Vec<Option<usize>> {
+        cols.iter().map(|c| self.names.iter().position(|n| n == c).map(|i| i + 1)).collect()
+    }
+
+    /// Valores da linha `row` nas posições `idx` ("" onde a coluna não existe).
+    fn values(&self, row: usize, idx: &[Option<usize>]) -> Vec<String> {
+        idx.iter()
+            .map(|i| i.and_then(|i| self.rows[row].get(i).cloned()).unwrap_or_default())
+            .collect()
+    }
 }
 
 /// Compara o arquivo em disco (`before`) com a cópia recuperada (`after`).
 pub fn diff_files(before: &Path, after: &Path) -> Result<Diff> {
-    let (columns_before, a) = row_lines(before)?;
-    diff_against(columns_before, &a, after)
+    Ok(diff_tables(&Table::open(before)?, &Table::open(after)?))
 }
 
-/// Compara o arquivo `before` com linhas já montadas (`columns_after`, `b`):
-/// o que mudou desde aquela versão.
-pub fn diff_since(before: &Path, columns_after: Vec<String>, b: &[String]) -> Result<Diff> {
-    let (columns_before, a) = row_lines(before)?;
-    build(columns_before, &a, columns_after, b)
+/// Compara o arquivo `before` com uma tabela já carregada (o documento
+/// aberto): o que mudou desde aquela versão.
+pub fn diff_since(before: &Path, after: &Table) -> Result<Diff> {
+    Ok(diff_tables(&Table::open(before)?, after))
 }
 
-fn diff_against(columns_before: Vec<String>, a: &[String], after: &Path) -> Result<Diff> {
-    let (columns_after, b) = row_lines(after)?;
-    build(columns_before, a, columns_after, &b)
+enum Op {
+    Same(usize, usize),
+    Del(usize),
+    Add(usize),
 }
 
-fn build(columns_before: Vec<String>, a: &[String], columns_after: Vec<String>, b: &[String]) -> Result<Diff> {
-    let ops = diff_lines(a, b);
-    let added = ops.iter().filter(|(t, _)| *t == Tag::Added).count();
-    let removed = ops.iter().filter(|(t, _)| *t == Tag::Removed).count();
-    let (lines, truncated) = collapse(ops);
-    Ok(Diff { columns_before, columns_after, added, removed, lines, truncated })
+fn diff_tables(a: &Table, b: &Table) -> Diff {
+    let mut common: Vec<String> = b.names.iter().filter(|n| a.names.contains(n)).cloned().collect();
+    if common.is_empty() {
+        // nenhuma coluna em comum: compara as linhas inteiras
+        common = b.names.clone();
+    }
+    // colunas da versão nova e, no fim, as que foram apagadas
+    let mut columns: Vec<(String, ColState)> = b
+        .names
+        .iter()
+        .map(|n| (n.clone(), if a.names.contains(n) { ColState::Same } else { ColState::Added }))
+        .collect();
+    columns.extend(a.names.iter().filter(|n| !b.names.contains(n)).map(|n| (n.clone(), ColState::Removed)));
+    let all: Vec<String> = columns.iter().map(|(n, _)| n.clone()).collect();
+
+    let key = |t: &Table| -> Vec<String> {
+        let idx = t.index(&common);
+        (0..t.rows.len()).map(|r| t.values(r, &idx).join("\u{1f}")).collect()
+    };
+    let (ka, kb) = (key(a), key(b));
+    let (ia, ib) = (a.index(&all), b.index(&all));
+    // linha nas duas versões: colunas novas vêm de `b`, apagadas de `a`
+    let both = |i: usize, j: usize| -> Vec<String> {
+        let (va, vb) = (a.values(i, &ia), b.values(j, &ib));
+        columns
+            .iter()
+            .zip(va.into_iter().zip(vb))
+            .map(|((_, st), (x, y))| if *st == ColState::Removed { x } else { y })
+            .collect()
+    };
+
+    let mut rows = Vec::new();
+    let (mut added, mut removed, mut changed) = (0, 0, 0);
+    let mut dels: Vec<usize> = Vec::new();
+    let mut adds: Vec<usize> = Vec::new();
+    // Fecha um trecho de apagadas/incluídas: casa as parecidas como alteradas.
+    let mut flush = |dels: &mut Vec<usize>, adds: &mut Vec<usize>, rows: &mut Vec<DiffRow>| {
+        let pairs = dels.len().min(adds.len());
+        let mut rest_d = Vec::new();
+        let mut rest_a = Vec::new();
+        for k in 0..pairs {
+            let (i, j) = (dels[k], adds[k]);
+            if similar(&ka[i], &kb[j]) {
+                rows.push(DiffRow { tag: Tag::Changed, values: both(i, j), old: a.values(i, &ia) });
+                changed += 1;
+            } else {
+                rest_d.push(i);
+                rest_a.push(j);
+            }
+        }
+        rest_d.extend_from_slice(&dels[pairs..]);
+        rest_a.extend_from_slice(&adds[pairs..]);
+        for i in rest_d {
+            rows.push(DiffRow { tag: Tag::Removed, values: a.values(i, &ia), old: Vec::new() });
+            removed += 1;
+        }
+        for j in rest_a {
+            rows.push(DiffRow { tag: Tag::Added, values: b.values(j, &ib), old: Vec::new() });
+            added += 1;
+        }
+        dels.clear();
+        adds.clear();
+    };
+    for op in diff_ops(&ka, &kb) {
+        match op {
+            Op::Del(i) => dels.push(i),
+            Op::Add(j) => adds.push(j),
+            Op::Same(i, j) => {
+                flush(&mut dels, &mut adds, &mut rows);
+                rows.push(DiffRow { tag: Tag::Same, values: both(i, j), old: Vec::new() });
+            }
+        }
+    }
+    flush(&mut dels, &mut adds, &mut rows);
+
+    // Coluna incluída ou apagada muda todas as linhas: elas ficam à mostra
+    // (sem recolher), para dar para ver os valores da coluna.
+    let cols_changed = columns.iter().any(|(_, st)| *st != ColState::Same);
+    let (rows, truncated) = if cols_changed {
+        let truncated = rows.len() > MAX_LINES;
+        (rows.into_iter().take(MAX_LINES).collect(), truncated)
+    } else {
+        collapse(rows)
+    };
+    Diff { columns, rows, added, removed, changed, truncated }
 }
 
-/// Sequência de operações que transforma `a` em `b`.
-pub fn diff_lines(a: &[String], b: &[String]) -> Vec<(Tag, String)> {
+/// Duas linhas são "a mesma, alterada" se no máximo metade das células
+/// mudou.
+fn similar(a: &str, b: &str) -> bool {
+    let (va, vb): (Vec<&str>, Vec<&str>) = (a.split('\u{1f}').collect(), b.split('\u{1f}').collect());
+    let differ = va.iter().zip(&vb).filter(|(x, y)| x != y).count();
+    differ * 2 <= va.len().max(1)
+}
+
+/// Operações que transformam `a` em `b`.
+fn diff_ops(a: &[String], b: &[String]) -> Vec<Op> {
     // prefixo e sufixo iguais saem de graça; só o miolo é comparado
     let pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
     let suf = a[pre..]
@@ -90,18 +209,20 @@ pub fn diff_lines(a: &[String], b: &[String]) -> Vec<(Tag, String)> {
         .count();
     let (ma, mb) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
 
-    let mut out: Vec<(Tag, String)> = a[..pre].iter().map(|l| (Tag::Same, l.clone())).collect();
-    if ma.len().saturating_mul(mb.len()) <= LCS_LIMIT {
-        out.extend(lcs(ma, mb));
-    } else {
-        out.extend(by_content(ma, mb));
-    }
-    out.extend(a[a.len() - suf..].iter().map(|l| (Tag::Same, l.clone())));
+    let mut out: Vec<Op> = (0..pre).map(|i| Op::Same(i, i)).collect();
+    let mid = if ma.len().saturating_mul(mb.len()) <= LCS_LIMIT { lcs(ma, mb) } else { by_content(ma, mb) };
+    out.extend(mid.into_iter().map(|op| match op {
+        Op::Same(i, j) => Op::Same(i + pre, j + pre),
+        Op::Del(i) => Op::Del(i + pre),
+        Op::Add(j) => Op::Add(j + pre),
+    }));
+    let (ea, eb) = (a.len() - suf, b.len() - suf);
+    out.extend((0..suf).map(|k| Op::Same(ea + k, eb + k)));
     out
 }
 
 /// Diferença exata (maior subsequência comum).
-fn lcs(a: &[String], b: &[String]) -> Vec<(Tag, String)> {
+fn lcs(a: &[String], b: &[String]) -> Vec<Op> {
     let (n, m) = (a.len(), b.len());
     let w = m + 1;
     let mut t = vec![0u32; (n + 1) * w];
@@ -118,73 +239,67 @@ fn lcs(a: &[String], b: &[String]) -> Vec<(Tag, String)> {
     let mut out = Vec::new();
     while i < n && j < m {
         if a[i] == b[j] {
-            out.push((Tag::Same, a[i].clone()));
+            out.push(Op::Same(i, j));
             i += 1;
             j += 1;
         } else if t[(i + 1) * w + j] >= t[i * w + j + 1] {
-            out.push((Tag::Removed, a[i].clone()));
+            out.push(Op::Del(i));
             i += 1;
         } else {
-            out.push((Tag::Added, b[j].clone()));
+            out.push(Op::Add(j));
             j += 1;
         }
     }
-    out.extend(a[i..].iter().map(|l| (Tag::Removed, l.clone())));
-    out.extend(b[j..].iter().map(|l| (Tag::Added, l.clone())));
+    out.extend((i..n).map(Op::Del));
+    out.extend((j..m).map(Op::Add));
     out
 }
 
-/// Para trechos enormes: removidas são as linhas de `a` que sobram depois
+/// Para trechos enormes: apagadas são as linhas de `a` que sobram depois
 /// de casar com as de `b` (contando repetições), e vice-versa. Não acompanha
 /// mudanças de posição, mas aponta tudo o que entrou e saiu.
-fn by_content(a: &[String], b: &[String]) -> Vec<(Tag, String)> {
-    let mut count: HashMap<&str, i64> = HashMap::new();
-    for l in b {
-        *count.entry(l).or_default() += 1;
-    }
-    let mut out = Vec::new();
-    for l in a {
-        let c = count.entry(l).or_default();
-        if *c > 0 {
-            *c -= 1;
-        } else {
-            out.push((Tag::Removed, l.clone()));
+fn by_content(a: &[String], b: &[String]) -> Vec<Op> {
+    let leftover = |from: &[String], other: &[String]| -> Vec<usize> {
+        let mut count: HashMap<&str, i64> = HashMap::new();
+        for l in other {
+            *count.entry(l).or_default() += 1;
         }
-    }
-    let mut count: HashMap<&str, i64> = HashMap::new();
-    for l in a {
-        *count.entry(l).or_default() += 1;
-    }
-    for l in b {
-        let c = count.entry(l).or_default();
-        if *c > 0 {
-            *c -= 1;
-        } else {
-            out.push((Tag::Added, l.clone()));
+        let mut out = Vec::new();
+        for (i, l) in from.iter().enumerate() {
+            let c = count.entry(l).or_default();
+            if *c > 0 {
+                *c -= 1;
+            } else {
+                out.push(i);
+            }
         }
-    }
+        out
+    };
+    let mut out: Vec<Op> = leftover(a, b).into_iter().map(Op::Del).collect();
+    out.extend(leftover(b, a).into_iter().map(Op::Add));
     out
 }
 
 /// Recolhe os trechos iguais longos, mantendo `CONTEXT` linhas em volta de
 /// cada mudança, e corta a lista em `MAX_LINES`.
-fn collapse(ops: Vec<(Tag, String)>) -> (Vec<(Tag, String)>, bool) {
+fn collapse(rows: Vec<DiffRow>) -> (Vec<DiffRow>, bool) {
     let changed: Vec<usize> =
-        ops.iter().enumerate().filter(|(_, (t, _))| *t != Tag::Same).map(|(i, _)| i).collect();
+        rows.iter().enumerate().filter(|(_, r)| r.tag != Tag::Same).map(|(i, _)| i).collect();
     let near = |i: usize| {
         // há mudança a até CONTEXT linhas de i?
         let p = changed.partition_point(|&c| c + CONTEXT < i);
         changed.get(p).is_some_and(|&c| c <= i + CONTEXT)
     };
+    let gap = |n: usize| DiffRow { tag: Tag::Gap, values: vec![n.to_string()], old: Vec::new() };
     let mut out = Vec::new();
     let mut skipped = 0;
-    for (i, op) in ops.into_iter().enumerate() {
-        if op.0 != Tag::Same || near(i) {
+    for (i, row) in rows.into_iter().enumerate() {
+        if row.tag != Tag::Same || near(i) {
             if skipped > 0 {
-                out.push((Tag::Gap, skipped.to_string()));
+                out.push(gap(skipped));
                 skipped = 0;
             }
-            out.push(op);
+            out.push(row);
             if out.len() >= MAX_LINES {
                 return (out, true);
             }
@@ -193,7 +308,7 @@ fn collapse(ops: Vec<(Tag, String)>) -> (Vec<(Tag, String)>, bool) {
         }
     }
     if skipped > 0 {
-        out.push((Tag::Gap, skipped.to_string()));
+        out.push(gap(skipped));
     }
     (out, false)
 }
@@ -206,33 +321,78 @@ mod tests {
         s.iter().map(|x| x.to_string()).collect()
     }
 
+    /// Tabela com uma linha por item de `rows` (valores separados por `|`).
+    fn table(names: &[&str], rows: &[&str]) -> Table {
+        Table {
+            names: v(names),
+            rows: rows
+                .iter()
+                .map(|r| std::iter::once("0").chain(r.split('|')).map(String::from).collect())
+                .collect(),
+        }
+    }
+
+    fn tags(d: &Diff) -> Vec<Tag> {
+        d.rows.iter().map(|r| r.tag).collect()
+    }
+
     #[test]
-    fn aponta_linha_alterada_adicionada_e_removida() {
-        let a = v(&["1", "2", "3", "4"]);
-        let b = v(&["1", "2x", "3", "5", "4"]);
-        let ops = diff_lines(&a, &b);
-        let tags: Vec<Tag> = ops.iter().map(|(t, _)| *t).collect();
+    fn aponta_linha_alterada_incluida_e_apagada() {
+        let a = table(&["id", "v"], &["1|a", "2|b", "3|c", "4|d"]);
+        let b = table(&["id", "v"], &["1|a", "2|X", "3|c", "9|z", "4|d"]);
+        let d = diff_tables(&a, &b);
         use Tag::*;
-        assert_eq!(tags, [Same, Removed, Added, Same, Added, Same]);
+        assert_eq!(tags(&d), [Same, Changed, Same, Added, Same]);
+        assert_eq!(d.rows[1].old, ["2", "b"]);
+        assert_eq!(d.rows[1].values, ["2", "X"]);
+        assert_eq!((d.added, d.removed, d.changed), (1, 0, 1));
+    }
+
+    #[test]
+    fn linhas_sem_relacao_nao_viram_alteracao() {
+        let a = table(&["id", "v"], &["1|a", "2|b"]);
+        let b = table(&["id", "v"], &["1|a", "7|q"]);
+        let d = diff_tables(&a, &b);
+        assert_eq!(tags(&d), [Tag::Same, Tag::Removed, Tag::Added]);
+    }
+
+    #[test]
+    fn coluna_apagada_nao_marca_todas_as_linhas() {
+        let a = table(&["id", "valor"], &["1|10", "2|20"]);
+        let b = table(&["id"], &["1", "2"]);
+        let d = diff_tables(&a, &b);
+        assert_eq!((d.added, d.removed, d.changed), (0, 0, 0));
+        assert_eq!(d.columns, [("id".to_string(), ColState::Same), ("valor".to_string(), ColState::Removed)]);
+        // a coluna apagada continua mostrando o valor que tinha
+        assert_eq!(d.rows[0].values, ["1", "10"]);
     }
 
     #[test]
     fn trechos_iguais_longos_sao_recolhidos() {
-        let a: Vec<String> = (0..100).map(|i| i.to_string()).collect();
-        let mut b = a.clone();
-        b[50] = "x".into();
-        let (lines, truncated) = collapse(diff_lines(&a, &b));
-        assert!(!truncated);
-        assert_eq!(lines[0], (Tag::Gap, "48".into()));
-        assert_eq!(lines.last().unwrap(), &(Tag::Gap, "47".into()));
-        assert_eq!(lines.iter().filter(|(t, _)| *t == Tag::Same).count(), 4);
+        let rows: Vec<String> = (0..100).map(|i| format!("{i}|x")).collect();
+        let a = table(&["id", "v"], &rows.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut rb = rows.clone();
+        rb[50] = "50|y".into();
+        let b = table(&["id", "v"], &rb.iter().map(String::as_str).collect::<Vec<_>>());
+        let d = diff_tables(&a, &b);
+        assert!(!d.truncated);
+        assert_eq!((d.rows[0].tag, d.rows[0].values[0].as_str()), (Tag::Gap, "48"));
+        let last = d.rows.last().unwrap();
+        assert_eq!((last.tag, last.values[0].as_str()), (Tag::Gap, "47"));
+        assert_eq!(d.rows.iter().filter(|r| r.tag == Tag::Same).count(), 4);
     }
 
     #[test]
     fn trecho_enorme_usa_comparacao_por_conteudo() {
-        let a = v(&["a", "b", "b"]);
-        let b = v(&["b", "c"]);
-        let ops = by_content(&a, &b);
-        assert_eq!(ops, [(Tag::Removed, "a".into()), (Tag::Removed, "b".into()), (Tag::Added, "c".into())]);
+        let ops = by_content(&v(&["a", "b", "b"]), &v(&["b", "c"]));
+        let got: Vec<String> = ops
+            .iter()
+            .map(|o| match o {
+                Op::Del(i) => format!("-{i}"),
+                Op::Add(j) => format!("+{j}"),
+                Op::Same(..) => "=".into(),
+            })
+            .collect();
+        assert_eq!(got, ["-0", "-2", "+1"]);
     }
 }

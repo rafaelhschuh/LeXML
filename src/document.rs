@@ -2038,7 +2038,7 @@ impl DocumentView {
                 return;
             }
         };
-        let current = crate::history::Current::new(self.state.dp.field_names(), rows);
+        let current = crate::diff::Table { names: self.state.dp.field_names(), rows };
         let name = path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
         let weak = Rc::downgrade(self);
         crate::history::show(

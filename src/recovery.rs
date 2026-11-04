@@ -3,10 +3,10 @@
 //! entre a cópia e o arquivo em disco.
 
 use crate::backup::Orphan;
-use crate::diff::{self, Tag};
+use crate::diff::{self, ColState, DiffRow, Tag};
 use crate::i18n::tr;
 use gtk::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -256,13 +256,18 @@ pub struct DiffTexts {
     pub same: &'static str,
 }
 
-/// Resumo + lista de linhas com `+`/`−` coloridos, reaproveitado pela
-/// recuperação e pelo histórico de versões.
+/// Classes de cor das células da tabela de diferenças (ver CSS em `app`).
+const DIFF_CLASSES: [&str; 7] =
+    ["diff-add", "diff-del", "diff-chg", "diff-gap", "diff-cell-chg", "diff-col-add", "diff-col-del"];
+
+/// Resumo + tabela com as linhas incluídas, apagadas e alteradas,
+/// reaproveitado pela recuperação e pelo histórico de versões.
 pub struct DiffPane {
     pub root: gtk::Box,
     spinner: gtk::Spinner,
     summary: gtk::Label,
-    buffer: gtk::TextBuffer,
+    view: gtk::ColumnView,
+    store: gio::ListStore,
     texts: DiffTexts,
 }
 
@@ -280,41 +285,27 @@ impl DiffPane {
         legend.add_css_class("dim-label");
         root.append(&legend);
 
-        let view = gtk::TextView::builder()
-            .editable(false)
-            .cursor_visible(false)
-            .monospace(true)
-            .wrap_mode(gtk::WrapMode::None)
-            .left_margin(8)
-            .top_margin(6)
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let view = gtk::ColumnView::builder()
+            .model(&gtk::NoSelection::new(Some(store.clone())))
+            .show_row_separators(true)
+            .show_column_separators(true)
+            .reorderable(false)
             .build();
-        let buffer = view.buffer();
-        let tag = |name: &str, bg: Option<&str>, dim: bool| {
-            let t = gtk::TextTag::new(Some(name));
-            if let Some(c) = bg.and_then(|c| gdk::RGBA::parse(c).ok()) {
-                t.set_paragraph_background_rgba(Some(&c));
-            }
-            if dim {
-                t.set_style(gtk::pango::Style::Italic);
-                t.set_foreground_rgba(gdk::RGBA::parse("rgba(128,128,128,0.9)").ok().as_ref());
-            }
-            buffer.tag_table().add(&t);
-        };
-        tag("add", Some("rgba(46,160,67,0.22)"), false);
-        tag("del", Some("rgba(220,53,69,0.22)"), false);
-        tag("gap", None, true);
+        view.add_css_class("data-table");
+        view.add_css_class("diff-table");
         let scroller = gtk::ScrolledWindow::builder().vexpand(true).hexpand(true).child(&view).build();
         scroller.add_css_class("frame");
         root.append(&scroller);
 
-        let pane = Self { root, spinner, summary, buffer, texts };
+        let pane = Self { root, spinner, summary, view, store, texts };
         pane.loading();
         pane
     }
 
-    /// Limpa a lista e mostra "Comparando…".
+    /// Limpa a tabela e mostra "Comparando…".
     pub fn loading(&self) {
-        self.buffer.set_text("");
+        self.store.remove_all();
         self.spinner.set_visible(true);
         self.spinner.start();
         self.summary.set_text(tr("diff_loading"));
@@ -323,7 +314,7 @@ impl DiffPane {
     pub fn show(&self, res: Result<diff::Diff, String>) {
         self.spinner.stop();
         self.spinner.set_visible(false);
-        self.buffer.set_text("");
+        self.store.remove_all();
         let d = match res {
             Ok(d) => d,
             Err(e) => {
@@ -331,37 +322,130 @@ impl DiffPane {
                 return;
             }
         };
-        let mut head_text = if d.added == 0 && d.removed == 0 && d.columns_before == d.columns_after {
+        let cols_changed = d.columns.iter().any(|(_, st)| *st != ColState::Same);
+        let mut head_text = if d.added == 0 && d.removed == 0 && d.changed == 0 && !cols_changed {
             self.texts.same.to_string()
         } else {
-            format!("{} {}  ·  {} {}", d.added, self.texts.added, d.removed, self.texts.removed)
+            format!(
+                "{} {}  ·  {} {}  ·  {} {}",
+                d.added,
+                self.texts.added,
+                d.removed,
+                self.texts.removed,
+                d.changed,
+                tr("diff_changed")
+            )
         };
-        if d.columns_before != d.columns_after {
-            head_text.push_str(&format!(
-                "\n{}: {}  →  {}",
-                tr("diff_columns"),
-                d.columns_before.join(", "),
-                d.columns_after.join(", ")
-            ));
+        for (state, key) in [(ColState::Removed, "diff_cols_removed"), (ColState::Added, "diff_cols_added")] {
+            let names: Vec<&str> =
+                d.columns.iter().filter(|(_, st)| *st == state).map(|(n, _)| n.as_str()).collect();
+            if !names.is_empty() {
+                head_text.push_str(&format!("\n{}: {}", tr(key), names.join(", ")));
+            }
         }
         if d.truncated {
             head_text.push_str(&format!("\n{}", tr("diff_truncated")));
         }
         self.summary.set_text(&head_text);
 
-        let buffer = &self.buffer;
-        let mut end = buffer.end_iter();
-        for (t, text) in &d.lines {
-            let (line, tag) = match t {
-                Tag::Added => (format!("+ {text}\n"), Some("add")),
-                Tag::Removed => (format!("− {text}\n"), Some("del")),
-                Tag::Same => (format!("  {text}\n"), None),
-                Tag::Gap => (format!("  … {text} {} …\n", tr("diff_equal_lines")), Some("gap")),
+        // As colunas mudam a cada comparação: refaz todas.
+        let old: Vec<gtk::ColumnViewColumn> =
+            self.view.columns().iter::<gtk::ColumnViewColumn>().flatten().collect();
+        for c in old {
+            self.view.remove_column(&c);
+        }
+        self.view.append_column(&diff_column("", None, ColState::Same));
+        for (k, (name, state)) in d.columns.iter().enumerate() {
+            let title = match state {
+                ColState::Same => name.clone(),
+                ColState::Added => format!("{name} {}", tr("diff_col_added_tag")),
+                ColState::Removed => format!("{name} {}", tr("diff_col_removed_tag")),
             };
-            match tag.and_then(|n| buffer.tag_table().lookup(n)) {
-                Some(tg) => buffer.insert_with_tags(&mut end, &line, &[&tg]),
-                None => buffer.insert(&mut end, &line),
+            self.view.append_column(&diff_column(&title, Some(k), *state));
+        }
+        let items: Vec<glib::BoxedAnyObject> = d.rows.into_iter().map(glib::BoxedAnyObject::new).collect();
+        self.store.extend_from_slice(&items);
+    }
+}
+
+/// Coluna da tabela de diferenças: `k` é a posição em `DiffRow::values`;
+/// `None` é a coluna estreita com o sinal (+, −, ~).
+fn diff_column(title: &str, k: Option<usize>, state: ColState) -> gtk::ColumnViewColumn {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        item.set_child(Some(&label));
+    });
+    factory.connect_bind(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        let (Some(obj), Some(label)) =
+            (item.item().and_downcast::<glib::BoxedAnyObject>(), item.child().and_downcast::<gtk::Label>())
+        else {
+            return;
+        };
+        let row = obj.borrow::<DiffRow>();
+        let mut classes: Vec<&str> = Vec::new();
+        classes.push(match row.tag {
+            Tag::Added => "diff-add",
+            Tag::Removed => "diff-del",
+            Tag::Changed => "diff-chg",
+            Tag::Gap => "diff-gap",
+            Tag::Same => "",
+        });
+        let text = match k {
+            None => match row.tag {
+                Tag::Added => "+".to_string(),
+                Tag::Removed => "−".to_string(),
+                Tag::Changed => "~".to_string(),
+                Tag::Gap | Tag::Same => String::new(),
+            },
+            Some(k) if row.tag == Tag::Gap => {
+                if k == 0 {
+                    format!("… {} {} …", row.values[0], tr("diff_equal_lines"))
+                } else {
+                    String::new()
+                }
             }
+            Some(k) => {
+                let new = row.values.get(k).map_or("", String::as_str);
+                let old = row.old.get(k).map_or(new, String::as_str);
+                if row.tag != Tag::Gap {
+                    match state {
+                        ColState::Added => classes.push("diff-col-add"),
+                        ColState::Removed => classes.push("diff-col-del"),
+                        ColState::Same => {}
+                    }
+                }
+                if row.tag == Tag::Changed && old != new {
+                    classes.push("diff-cell-chg");
+                    format!("{old} → {new}")
+                } else {
+                    new.to_string()
+                }
+            }
+        };
+        label.set_text(&text);
+        label.set_tooltip_text((!text.is_empty()).then_some(text.as_str()));
+        // A cor vai na célula inteira (o pai do rótulo), não só no texto.
+        let target: gtk::Widget = label.parent().unwrap_or_else(|| label.clone().upcast());
+        for c in DIFF_CLASSES {
+            target.remove_css_class(c);
+        }
+        for c in classes.into_iter().filter(|c| !c.is_empty()) {
+            target.add_css_class(c);
+        }
+    });
+    let col = gtk::ColumnViewColumn::new(Some(title), Some(factory));
+    match k {
+        None => col.set_fixed_width(32),
+        Some(_) => {
+            col.set_expand(true);
+            col.set_resizable(true);
         }
     }
+    col
 }

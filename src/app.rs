@@ -1115,6 +1115,31 @@ pub fn run() -> glib::ExitCode {
             columnview > listview > row:selected cell.cell-selected {
                 background-color: alpha(@accent_bg_color, 0.28);
             }
+            /* Tabela de diferenças (recuperação e histórico de versões):
+               linha incluída em verde, apagada em vermelho, alterada em
+               amarelo com a célula que mudou mais forte. */
+            columnview.diff-table > listview > row cell.diff-add {
+                background-color: rgba(46, 160, 67, 0.22);
+            }
+            columnview.diff-table > listview > row cell.diff-del {
+                background-color: rgba(220, 53, 69, 0.22);
+            }
+            columnview.diff-table > listview > row cell.diff-chg {
+                background-color: rgba(210, 153, 34, 0.10);
+            }
+            columnview.diff-table > listview > row cell.diff-col-add {
+                background-image: linear-gradient(rgba(46, 160, 67, 0.10), rgba(46, 160, 67, 0.10));
+            }
+            columnview.diff-table > listview > row cell.diff-col-del {
+                background-image: linear-gradient(rgba(220, 53, 69, 0.10), rgba(220, 53, 69, 0.10));
+            }
+            columnview.diff-table > listview > row cell.diff-cell-chg {
+                background-color: rgba(210, 153, 34, 0.38);
+            }
+            columnview.diff-table > listview > row cell.diff-gap {
+                font-style: italic;
+                color: alpha(currentColor, 0.6);
+            }
             /* Limpa o foco nativo do EditableLabel para não
                duplicar com o contorno da célula. */
             columnview cell editablelabel:focus,

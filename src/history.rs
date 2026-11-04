@@ -10,32 +10,13 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
-
-/// O documento aberto, como `XmlDoc::filter` o devolve: nomes das colunas e
-/// linhas (com o rowid na frente). As linhas de texto para comparar são
-/// montadas uma vez só, na primeira comparação, fora da thread da interface.
-pub struct Current {
-    pub names: Vec<String>,
-    pub rows: Vec<Vec<String>>,
-    lines: OnceLock<Vec<String>>,
-}
-
-impl Current {
-    pub fn new(names: Vec<String>, rows: Vec<Vec<String>>) -> Self {
-        Self { names, rows, lines: OnceLock::new() }
-    }
-
-    fn lines(&self) -> &[String] {
-        self.lines.get_or_init(|| diff::lines_of(&self.names, &self.rows))
-    }
-}
+use std::sync::Arc;
 
 pub fn show(
     parent: Option<&gtk::Window>,
     name: &str,
     versions: Vec<Version>,
-    current: Current,
+    current: diff::Table,
     on_restore: Rc<dyn Fn(Version)>,
 ) {
     let win = gtk::Window::builder()
@@ -128,7 +109,7 @@ pub fn show(
             generation.set(gen);
             let (current, path) = (current.clone(), v.data.clone());
             let handle = gio::spawn_blocking(move || {
-                diff::diff_since(&path, current.names.clone(), current.lines()).map_err(|e| e.to_string())
+                diff::diff_since(&path, &current).map_err(|e| e.to_string())
             });
             let (pane, generation) = (pane.clone(), generation.clone());
             glib::spawn_future_local(async move {

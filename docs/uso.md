@@ -464,10 +464,9 @@ O Lê-XML guarda backups fora da pasta do arquivo, em
 O botão de relógio na barra de ferramentas abre o histórico do arquivo:
 à esquerda, as versões da mais recente para a mais antiga, cada uma com data,
 hora e tipo (**Como estava salvo**, **Edição não salva** ou **Antes de
-restaurar outra versão**); à direita, o que mudou da versão escolhida até o
-documento como está agora, inclusive alterações ainda não salvas — em
-vermelho (`−`) o que estava na versão e foi apagado, em verde (`+`) o que
-entrou depois dela.
+restaurar outra versão**); à direita, numa tabela com as colunas do arquivo,
+o que mudou da versão escolhida até o documento como está agora, inclusive
+alterações ainda não salvas (veja [Tabela de diferenças](#tabela-de-diferenças)).
 
 **Restaurar esta versão** troca o documento da janela pela versão, com
 "(versão de …)" no título. Ele fica marcado como alterado: **Salvar** grava
@@ -496,11 +495,31 @@ Para cada documento:
   **Salvar como**, se era um documento novo);
 - **Descartar** apaga a cópia e, ao abrir um arquivo, carrega a versão do
   disco;
-- **Ver diferenças** compara a cópia com o arquivo em disco, linha por linha:
-  em vermelho (`−`) o que está só no disco, em verde (`+`) o que está só na
-  cópia, e os trechos iguais recolhidos. A janela também tem **Restaurar** e
-  **Descartar**. Fica indisponível quando o arquivo de origem não existe mais;
+- **Ver diferenças** compara a cópia com o arquivo em disco, numa tabela
+  (veja [Tabela de diferenças](#tabela-de-diferenças)). A janela também tem
+  **Restaurar** e **Descartar**. Fica indisponível quando o arquivo de origem
+  não existe mais;
 - **Decidir depois** mantém a cópia para a próxima abertura.
+
+### Tabela de diferenças
+
+O histórico e a recuperação mostram as diferenças numa tabela com as colunas
+do arquivo. A primeira coluna marca cada linha:
+
+- **−** (vermelho): a linha existia antes e foi apagada;
+- **+** (verde): a linha entrou depois;
+- **~** (amarelo): a mesma linha com células alteradas. A célula que mudou
+  fica mais forte e mostra `antes → depois`.
+
+Uma linha só conta como alterada quando no máximo metade das células mudou;
+fora disso, aparece como apagada e incluída. Os trechos iguais longos ficam
+recolhidos em "… N linha(s) igual(is) …", com duas linhas de contexto em
+volta de cada mudança.
+
+Coluna incluída ou apagada não marca todas as linhas como diferentes: o
+cabeçalho dela ganha "(nova)" ou "(apagada)", as células ficam levemente
+coloridas, e o resumo lista as colunas que mudaram. Nesse caso as linhas não
+são recolhidas, para dar para ver os valores da coluna.
 
 ### Limpeza
 
