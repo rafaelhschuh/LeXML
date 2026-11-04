@@ -9,6 +9,9 @@ mod recent;
 mod sort;
 mod replace;
 mod rowclip;
+mod backup;
+mod diff;
+mod recovery;
 mod row_object;
 
 fn main() -> gtk::glib::ExitCode {

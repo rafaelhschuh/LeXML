@@ -1136,6 +1136,12 @@ impl XmlDoc {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        write_atomic(path, self.to_xml()?.as_bytes())
+    }
+
+    /// Monta o XML do documento, sem gravar. Separado de `save` para o backup
+    /// gravar o arquivo fora da thread da interface.
+    pub fn to_xml(&self) -> Result<String> {
         let names = self.field_names();
         // Última barreira: nomes de campo viram nomes de atributo e não podem
         // ser escapados. Um nome inválido aqui significaria gravar XML quebrado.
@@ -1187,8 +1193,7 @@ impl XmlDoc {
             out.push_str("/>");
         }
         out.push_str("</ROWDATA></DATAPACKET>");
-
-        write_atomic(path, out.as_bytes())
+        Ok(out)
     }
 
     pub fn export_csv(&self, path: &Path, result: &QueryResult) -> Result<()> {

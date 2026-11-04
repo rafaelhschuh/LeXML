@@ -1,7 +1,7 @@
 use crate::document::DocumentView;
 use crate::textdoc::TextDocView;
 use crate::xmldoc::{QueryResult, XmlDoc};
-use crate::{config, dialog, i18n, recent};
+use crate::{backup, config, dialog, i18n, recent};
 use crate::i18n::tr;
 use gtk::glib::clone;
 use gtk::prelude::*;
@@ -50,6 +50,12 @@ impl OpenDoc {
             d.teardown();
         }
     }
+    /// Fechamento normal: a cópia de recuperação não é mais necessária.
+    fn discard_backup(&self) {
+        if let OpenDoc::Table(d) = self {
+            d.discard_backup();
+        }
+    }
 }
 
 /// Título de duas linhas para a HeaderBar (substitui `adw::WindowTitle`).
@@ -93,6 +99,8 @@ pub enum Initial {
     Empty,
     Open(PathBuf),
     Blank,
+    /// Reabre uma cópia de recuperação deixada por uma sessão que caiu.
+    Recover(backup::Orphan),
 }
 
 pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::ApplicationWindow {
@@ -157,7 +165,7 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
             if current.borrow().is_some() {
                 build_window(&app, Initial::Open(path)).present();
             } else {
-                open_into(&path, &window, &stack, &current, &title);
+                open_checked(&path, &window, &stack, &current, &title);
             }
         })
     };
@@ -262,10 +270,16 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         @strong current, @strong confirmed_close => @default-return glib::Propagation::Proceed,
         move |win| {
             if confirmed_close.get() {
+                if let Some(d) = current.borrow().as_ref() {
+                    d.discard_backup();
+                }
                 return glib::Propagation::Proceed;
             }
             let dirty = current.borrow().as_ref().map_or(false, |d| d.is_dirty());
             if !dirty {
+                if let Some(d) = current.borrow().as_ref() {
+                    d.discard_backup();
+                }
                 return glib::Propagation::Proceed;
             }
             let alert = gtk::AlertDialog::builder()
@@ -304,12 +318,89 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     ));
 
     match initial {
-        Initial::Open(path) => open_into(&path, &window, &stack, &current, &title),
+        Initial::Open(path) => open_checked(&path, &window, &stack, &current, &title),
+        Initial::Recover(orphan) => {
+            let data = orphan.data.clone();
+            open_into(&data, &window, &stack, &current, &title, Some(orphan));
+        }
         Initial::Blank => blank_into(&window, &stack, &current, &title),
         Initial::Empty => {}
     }
 
     window
+}
+
+thread_local! {
+    /// Cópias de recuperação já oferecidas ao abrir o arquivo de origem, para
+    /// o diálogo geral da abertura do app não perguntar de novo por elas.
+    static CLAIMED: RefCell<std::collections::HashSet<PathBuf>> = RefCell::default();
+}
+
+/// Uma vez por execução: se sobraram cópias de recuperação de uma sessão que
+/// não fechou normalmente, oferece Restaurar / Descartar / Ver diferenças.
+fn offer_recovery(app: &gtk::Application, parent: &gtk::ApplicationWindow) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ASKED: AtomicBool = AtomicBool::new(false);
+    if ASKED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let orphans: Vec<backup::Orphan> = backup::orphans()
+        .into_iter()
+        .filter(|o| !CLAIMED.with(|c| c.borrow().contains(&o.data)))
+        .collect();
+    if orphans.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    crate::recovery::show_dialog(
+        parent.upcast_ref(),
+        orphans,
+        Rc::new(move |o| build_window(&app, Initial::Recover(o)).present()),
+        Box::new(|| {}),
+    );
+}
+
+/// Abre `path`, mas antes, se ele tem uma cópia de recuperação deixada por
+/// uma sessão que caiu, pergunta o que fazer com ela (como o Office faz).
+fn open_checked(
+    path: &Path,
+    window: &gtk::ApplicationWindow,
+    stack: &gtk::Stack,
+    current: &Rc<RefCell<Option<OpenDoc>>>,
+    title: &TitleWidget,
+) {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let target = canon(path);
+    let found = backup::orphans()
+        .into_iter()
+        .find(|o| o.original.as_deref().map(canon).as_ref() == Some(&target));
+    let Some(orphan) = found else {
+        open_into(path, window, stack, current, title, None);
+        return;
+    };
+    CLAIMED.with(|c| c.borrow_mut().insert(orphan.data.clone()));
+
+    let restored = Rc::new(std::cell::Cell::new(false));
+    let on_restore: Rc<dyn Fn(backup::Orphan)> = {
+        let (window, stack, current, title) = (window.clone(), stack.clone(), current.clone(), title.clone());
+        let restored = restored.clone();
+        Rc::new(move |o: backup::Orphan| {
+            restored.set(true);
+            let data = o.data.clone();
+            open_into(&data, &window, &stack, &current, &title, Some(o));
+        })
+    };
+    // Descartar ou decidir depois: abre o arquivo como está em disco.
+    let on_finish: Box<dyn FnOnce()> = {
+        let (window, stack, current, title) = (window.clone(), stack.clone(), current.clone(), title.clone());
+        let path = path.to_path_buf();
+        Box::new(move || {
+            if !restored.get() {
+                open_into(&path, &window, &stack, &current, &title, None);
+            }
+        })
+    };
+    crate::recovery::show_dialog(window.upcast_ref(), vec![orphan], on_restore, on_finish);
 }
 
 /// Página inicial "Nenhum arquivo aberto" (substitui `adw::StatusPage`).
@@ -582,11 +673,15 @@ fn open_into(
     stack: &gtk::Stack,
     current: &Rc<RefCell<Option<OpenDoc>>>,
     title: &TitleWidget,
+    recover: Option<backup::Orphan>,
 ) {
-    let label = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "arquivo".into());
+    let label = match &recover {
+        Some(o) => format!("{} ({})", o.name, tr("recovered")),
+        None => path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "arquivo".into()),
+    };
 
     // Exibe a página de carregamento de imediato.
     if stack.child_by_name("loading").is_none() {
@@ -618,8 +713,21 @@ fn open_into(
     glib::spawn_future_local(async move {
         match handle.await {
             Ok(Loaded::Table(dp, initial)) => {
-                recent::add(&path_ui);
-                let view = DocumentView::new(dp, path_ui);
+                // Na recuperação, o documento "é" o arquivo de origem (Salvar
+                // grava nele), não a cópia que está no cache.
+                let view_path = match &recover {
+                    Some(o) => o.original.clone().unwrap_or_else(|| PathBuf::from(&o.name)),
+                    None => {
+                        recent::add(&path_ui);
+                        path_ui.clone()
+                    }
+                };
+                let view = DocumentView::new(dp, view_path);
+                if let Some(o) = &recover {
+                    view.mark_recovered();
+                    // o conteúdo está na memória e entra na cópia desta sessão
+                    o.discard();
+                }
                 // Instala a tabela mas mantém o spinner até a carga terminar.
                 install_doc(
                     OpenDoc::Table(view.clone()),
@@ -796,6 +904,59 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
         c.theme = val.to_string();
         config::save(&c);
     });
+
+    // ---------- Aba: Backup ----------
+    let bk = settings_page();
+    let spin = |min: f64, max: f64, val: u32| {
+        let s = gtk::SpinButton::with_range(min, max, 1.0);
+        s.set_value(f64::from(val));
+        s
+    };
+    let keep = spin(1.0, 365.0, cfg.backup_keep_days);
+    bk.append(&pref_row(tr("backup_keep_days"), &keep));
+    let max_mb = spin(10.0, 100_000.0, cfg.backup_max_mb);
+    bk.append(&pref_row(tr("backup_max_mb"), &max_mb));
+
+    let bk_note = gtk::Label::builder()
+        .label(tr("backup_note"))
+        .wrap(true)
+        .xalign(0.0)
+        .margin_top(6)
+        .build();
+    bk_note.add_css_class("dim-label");
+    bk.append(&bk_note);
+
+    let open_dir = gtk::Button::builder()
+        .label(tr("backup_open_folder"))
+        .halign(gtk::Align::Start)
+        .build();
+    open_dir.connect_clicked(|b| {
+        let dir = backup::root();
+        let _ = std::fs::create_dir_all(&dir);
+        let win = b.root().and_downcast::<gtk::Window>();
+        gtk::FileLauncher::new(Some(&gio::File::for_path(dir))).launch(
+            win.as_ref(),
+            gio::Cancellable::NONE,
+            |_| {},
+        );
+    });
+    bk.append(&open_dir);
+
+    let save_backup_cfg = {
+        let (keep, max_mb) = (keep.clone(), max_mb.clone());
+        move || {
+            let mut c = config::load();
+            c.backup_keep_days = keep.value() as u32;
+            c.backup_max_mb = max_mb.value() as u32;
+            config::save(&c);
+        }
+    };
+    for s in [&keep, &max_mb] {
+        let f = save_backup_cfg.clone();
+        s.connect_value_changed(move |_| f());
+    }
+
+    notebook.append_page(&bk, Some(&gtk::Label::new(Some(tr("backup")))));
 
     // ---------- Aba: Sobre ----------
     let sobre = settings_page();
@@ -983,6 +1144,17 @@ pub fn run() -> glib::ExitCode {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
 
+        // Limpeza dos backups ao iniciar e a cada hora, fora da thread da UI.
+        let clean = || {
+            let c = config::load();
+            std::thread::spawn(move || backup::cleanup(c.backup_keep_days, c.backup_max_mb));
+        };
+        clean();
+        glib::timeout_add_seconds_local(3600, move || {
+            clean();
+            glib::ControlFlow::Continue
+        });
+
         // GTK4 puro: o app segue o tema (e cor de destaque) do sistema. Só
         // sobrepomos claro/escuro quando configurado. LEXML_THEME sobrepõe.
         match std::env::var("LEXML_THEME").as_deref() {
@@ -995,6 +1167,7 @@ pub fn run() -> glib::ExitCode {
     app.connect_activate(|app| {
         let window = build_window(app, Initial::Empty);
         window.present();
+        offer_recovery(app, &window);
     });
     app.connect_open(|app, files, _hint| {
         for file in files {
@@ -1006,6 +1179,9 @@ pub fn run() -> glib::ExitCode {
         if files.is_empty() {
             let window = build_window(app, Initial::Empty);
             window.present();
+        }
+        if let Some(w) = app.active_window().and_then(|w| w.downcast::<gtk::ApplicationWindow>().ok()) {
+            offer_recovery(app, &w);
         }
     });
     app.run()

@@ -1,11 +1,15 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Preferências persistidas do app (tema e idioma).
+/// Preferências persistidas do app.
 #[derive(Clone)]
 pub struct Config {
     pub theme: String, // "system" | "light" | "dark"
     pub lang: String,  // "pt" | "en"
+    /// Dias que os backups ficam guardados.
+    pub backup_keep_days: u32,
+    /// Tamanho máximo da pasta de backups, em MB.
+    pub backup_max_mb: u32,
 }
 
 impl Default for Config {
@@ -13,6 +17,8 @@ impl Default for Config {
         Config {
             theme: "system".into(),
             lang: "pt".into(),
+            backup_keep_days: 7,
+            backup_max_mb: 500,
         }
     }
 }
@@ -39,6 +45,8 @@ pub fn load() -> Config {
             match k.trim() {
                 "theme" => cfg.theme = v,
                 "lang" => cfg.lang = v,
+                "backup_keep_days" => cfg.backup_keep_days = v.parse().unwrap_or(7).clamp(1, 365),
+                "backup_max_mb" => cfg.backup_max_mb = v.parse().unwrap_or(500).clamp(10, 100_000),
                 _ => {}
             }
         }
@@ -51,6 +59,9 @@ pub fn save(cfg: &Config) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let body = format!("theme={}\nlang={}\n", cfg.theme, cfg.lang);
+    let body = format!(
+        "theme={}\nlang={}\nbackup_keep_days={}\nbackup_max_mb={}\n",
+        cfg.theme, cfg.lang, cfg.backup_keep_days, cfg.backup_max_mb
+    );
     let _ = fs::write(path, body);
 }

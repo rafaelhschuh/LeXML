@@ -28,6 +28,10 @@ struct State {
     // `true` enquanto o carregamento em blocos ainda não terminou — bloqueia
     // ações estruturais (inserir/mover/clonar/excluir) sobre um store parcial.
     loading: Cell<bool>,
+    // Contador de alterações e o valor dele na última cópia de recuperação:
+    // a cópia periódica só grava quando há algo novo.
+    rev: Cell<u64>,
+    backed_rev: Cell<u64>,
     // Ordenação da grade pelo cabeçalho: (coluna, crescente). `None` é a
     // ordem do documento. Só muda a exibição — o arquivo salvo mantém a
     // ordem das linhas.
@@ -58,6 +62,14 @@ pub struct DocumentView {
     replace_revealer: gtk::Revealer,
     // Camada de "trabalhando…" sobre a tabela durante operações longas.
     busy: Cell<bool>,
+    // Cópia de recuperação deste documento (ver `backup`).
+    recovery: crate::backup::Recovery,
+    backup_writing: Cell<bool>,
+    // Geração da cópia agendada: cada alteração adia a gravação, para uma
+    // sequência de edições virar uma gravação só.
+    backup_gen: Cell<u64>,
+    // Referência fraca a si mesmo, para agendar a cópia a partir de `&self`.
+    weak_self: RefCell<std::rc::Weak<Self>>,
     busy_shade: gtk::Box,
     busy_spinner: gtk::Spinner,
     busy_label: gtk::Label,
@@ -99,6 +111,8 @@ impl DocumentView {
             last_filter: RefCell::new(String::new()),
             generation: Cell::new(0),
             loading: Cell::new(false),
+            rev: Cell::new(0),
+            backed_rev: Cell::new(0),
             sort: RefCell::new(None),
             unsorted: RefCell::new(None),
         });
@@ -350,6 +364,10 @@ impl DocumentView {
             toolbar: bar.clone(),
             replace_revealer: replace_revealer.clone(),
             busy: Cell::new(false),
+            recovery: crate::backup::Recovery::new(),
+            backup_writing: Cell::new(false),
+            backup_gen: Cell::new(0),
+            weak_self: RefCell::new(std::rc::Weak::new()),
             busy_shade,
             busy_spinner,
             busy_label,
@@ -527,6 +545,8 @@ impl DocumentView {
             me.search_gen.set(me.search_gen.get().wrapping_add(1));
             me.find_next(&e.text());
         }));
+
+        *me.weak_self.borrow_mut() = Rc::downgrade(&me);
 
         // A carga inicial (completa) é disparada por quem cria a view
         // (`load_initial`/`load_blank`), fora da thread de UI e em blocos.
@@ -1624,9 +1644,14 @@ impl DocumentView {
     /// Grava diretamente em `path`, atualizando estado (destino conhecido e
     /// flag de "sujo"). Retorna `true` em sucesso.
     fn write_to(self: &Rc<Self>, path: &std::path::Path) -> bool {
+        // guarda a versão que está em disco antes de sobrescrevê-la
+        crate::backup::save_version(path);
         match self.state.dp.save(path) {
             Ok(()) => {
                 crate::recent::add(path);
+                // salvo: a cópia de recuperação não é mais necessária
+                self.recovery.remove();
+                self.state.backed_rev.set(self.state.rev.get());
                 *self.state.dirty.borrow_mut() = false;
                 *self.state.saved_path.borrow_mut() = Some(path.to_path_buf());
                 let when = glib::DateTime::now_local()
@@ -1759,9 +1784,87 @@ impl DocumentView {
     }
 
     /// Marca o documento como alterado e atualiza os botões de desfazer/refazer.
+    /// Grava a cópia de recuperação, se houve alteração desde a última. O XML
+    /// é montado aqui (rápido); a escrita em disco vai para outra thread.
+    fn autosave(self: &Rc<Self>) {
+        let rev = self.state.rev.get();
+        if !self.is_dirty()
+            || rev == self.state.backed_rev.get()
+            || self.busy.get()
+            || self.state.loading.get()
+            || self.backup_writing.get()
+        {
+            return;
+        }
+        let Ok(xml) = self.state.dp.to_xml() else { return };
+        let (data, meta) = self.recovery.paths();
+        let original = self.state.saved_path.borrow().clone();
+        let name = original
+            .as_deref()
+            .unwrap_or(&self.state.path)
+            .file_name()
+            .map_or_else(|| "novo.xml".into(), |s| s.to_string_lossy().into_owned());
+        self.backup_writing.set(true);
+        let handle = gio::spawn_blocking(move || {
+            crate::backup::Recovery::write(&data, &meta, xml.as_bytes(), original.as_deref(), &name)
+                .is_ok()
+        });
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let ok = handle.await.unwrap_or(false);
+            let Some(me) = weak.upgrade() else { return };
+            me.backup_writing.set(false);
+            if ok {
+                me.state.backed_rev.set(rev);
+            }
+            // salvo enquanto a cópia era gravada: ela não serve mais
+            if !me.is_dirty() {
+                me.recovery.remove();
+            } else if me.state.rev.get() != rev {
+                // houve alteração durante a gravação: grava de novo
+                me.schedule_backup();
+            }
+        });
+    }
+
+    /// Apaga a cópia de recuperação (documento fechado sem pendências ou
+    /// alterações descartadas pelo usuário).
+    pub fn discard_backup(&self) {
+        self.recovery.remove();
+    }
+
+    /// Documento aberto a partir de uma cópia de recuperação: fica marcado
+    /// como alterado, para o usuário salvar.
+    pub fn mark_recovered(&self) {
+        self.mark_dirty();
+        self.status.set_text(tr("recovered_status"));
+    }
+
     fn mark_dirty(&self) {
+        self.state.rev.set(self.state.rev.get() + 1);
         *self.state.dirty.borrow_mut() = true;
         self.refresh_history_buttons();
+        self.schedule_backup();
+    }
+
+    /// Agenda a cópia de recuperação para logo depois da última alteração
+    /// (cada nova alteração adia a gravação em `BACKUP_DELAY`).
+    fn schedule_backup(&self) {
+        const BACKUP_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
+        let g = self.backup_gen.get().wrapping_add(1);
+        self.backup_gen.set(g);
+        let weak = self.weak_self.borrow().clone();
+        glib::timeout_add_local_once(BACKUP_DELAY, move || {
+            let Some(me) = weak.upgrade() else { return };
+            if me.backup_gen.get() != g {
+                return; // outra alteração veio depois: ela agenda a sua
+            }
+            if me.busy.get() || me.state.loading.get() {
+                me.schedule_backup(); // tenta de novo quando a operação acabar
+            } else {
+                me.autosave();
+            }
+        });
     }
 
     /// Desfazer/refazer só valem na visão editável: o resultado de uma

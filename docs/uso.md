@@ -16,6 +16,7 @@ Este guia descreve o comportamento da versão 0.5.4 do Lê-XML.
 - [Executar uma consulta SQL](#executar-uma-consulta-sql)
 - [Somar uma coluna](#somar-uma-coluna)
 - [Salvar](#salvar)
+- [Backup e recuperação](#backup-e-recuperação)
 - [Exportar CSV](#exportar-csv)
 - [Configurações](#configurações)
 - [Atalhos](#atalhos)
@@ -424,6 +425,56 @@ permissões do arquivo substituído. Se faltar espaço em disco ou o aplicativo
 for interrompido no meio da escrita, o arquivo original continua intacto em vez
 de ficar truncado. O mesmo vale para a exportação CSV.
 
+## Backup e recuperação
+
+O Lê-XML guarda backups fora da pasta do arquivo, em
+`~/.cache/lexml/backup/`:
+
+- **Cópia de recuperação** (`recuperacao/`) — cada alteração não salva num
+  documento tabular é copiada logo em seguida (menos de um segundo depois da
+  última edição; uma sequência rápida de edições vira uma gravação só). A
+  cópia é gravada em segundo plano, sem travar a janela, e é apagada quando o
+  documento é salvo ou fechado normalmente.
+- **Versões** (`versoes/`) — antes de cada salvamento sobrescrever um arquivo,
+  a versão que estava em disco é copiada como `nome_AAAAMMDD-HHMMSS.xml`.
+
+### Recuperar depois de uma queda
+
+Se o aplicativo fechar sem salvar — falta de energia, travamento, sistema
+desligado —, a cópia de recuperação sobra no cache e o Lê-XML pergunta o que
+fazer com ela, no estilo do Office:
+
+- **ao abrir o aplicativo**, uma janela lista os documentos com cópia
+  pendente;
+- **ao abrir um arquivo** que tem cópia pendente (pelo seletor, pelos recentes
+  ou pela linha de comando), a pergunta aparece antes de carregá-lo.
+
+Para cada documento:
+
+- **Restaurar** abre a cópia, com "(recuperado)" no título. O documento fica
+  marcado como alterado e **Salvar** grava no arquivo de origem (ou abre
+  **Salvar como**, se era um documento novo);
+- **Descartar** apaga a cópia e, ao abrir um arquivo, carrega a versão do
+  disco;
+- **Ver diferenças** compara a cópia com o arquivo em disco, linha por linha:
+  em vermelho (`−`) o que está só no disco, em verde (`+`) o que está só na
+  cópia, e os trechos iguais recolhidos. A janela também tem **Restaurar** e
+  **Descartar**. Fica indisponível quando o arquivo de origem não existe mais;
+- **Decidir depois** mantém a cópia para a próxima abertura.
+
+### Limpeza
+
+Ao abrir o aplicativo e a cada hora, são apagados os backups com mais de 7
+dias. Se a pasta ainda passar de 500 MB, os mais antigos saem primeiro. As
+cópias de documentos abertos no momento nunca são apagadas.
+
+### Configurações
+
+Na aba **Backup** das configurações dá para ajustar os dias de retenção e o
+tamanho máximo da pasta, além de abrir a pasta de backups.
+
+Documentos abertos no modo texto não têm cópia de recuperação.
+
 ## Exportar CSV
 
 Clique no botão com ícone de planilha, escolha o destino e confirme.
@@ -500,7 +551,8 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 - Nomes de coluna precisam ser nomes válidos de atributo XML.
 - O histórico de desfazer/refazer guarda as últimas 500 alterações e não
   sobrevive ao fechamento da janela.
-- O aplicativo não salva automaticamente.
+- O aplicativo não salva automaticamente no arquivo; ele guarda cópias de
+  recuperação no cache (veja [Backup e recuperação](#backup-e-recuperação)).
 - Salvar um documento tabular normaliza a formatação do XML; não preserva
   indentação e espaços do arquivo original.
 - Células vazias são gravadas como atributos ausentes.
