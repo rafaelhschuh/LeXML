@@ -822,6 +822,18 @@ impl XmlDoc {
         })
     }
 
+    /// Posição (`__ord`) de cada linha, para devolver a grade à ordem do
+    /// documento depois de ordená-la por uma coluna.
+    pub fn row_orders(&self) -> Result<HashMap<i64, f64>> {
+        let mut stmt = self
+            .db
+            .prepare(&format!("SELECT {}, {} FROM dados", self.q_rid(), self.q_ord()))?;
+        let map = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))?
+            .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+        Ok(map)
+    }
+
     /// Valores da linha `rowid` na ordem de `field_names()`, se ela existir e
     /// passar pelo filtro `where_clause`.
     pub fn visible_row(&self, rowid: i64, where_clause: &str) -> Result<Option<Vec<String>>> {
@@ -1265,7 +1277,7 @@ fn value_to_string(v: &Value) -> String {
 }
 
 /// Aceita "1234.56" (ponto decimal) e BR "1.234,56".
-fn parse_number(s: &str) -> Option<f64> {
+pub fn parse_number(s: &str) -> Option<f64> {
     let t = s.trim();
     if t.is_empty() {
         return None;

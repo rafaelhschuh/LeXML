@@ -1,6 +1,7 @@
 use crate::xmldoc::{Change, XmlDoc, QueryResult};
 use crate::row_object::RowObject;
 use crate::dialog;
+use crate::sort::{cmp_keys, sort_key, SortKey};
 use crate::i18n::tr;
 use gtk::prelude::*;
 use gtk::glib::{self, clone};
@@ -25,6 +26,13 @@ struct State {
     // `true` enquanto o carregamento em blocos ainda não terminou — bloqueia
     // ações estruturais (inserir/mover/clonar/excluir) sobre um store parcial.
     loading: Cell<bool>,
+    // Ordenação da grade pelo cabeçalho: (coluna, crescente). `None` é a
+    // ordem do documento. Só muda a exibição — o arquivo salvo mantém a
+    // ordem das linhas.
+    sort: RefCell<Option<(String, bool)>>,
+    // Ordem original de um resultado SQL (somente leitura), guardada ao
+    // ordená-lo, para o terceiro clique poder voltar a ela.
+    unsorted: RefCell<Option<Vec<RowObject>>>,
 }
 
 pub struct DocumentView {
@@ -43,6 +51,11 @@ pub struct DocumentView {
     // Geração da busca com debounce: cada tecla incrementa; o timeout só executa
     // a busca se sua geração ainda for a atual (evita varredura por tecla).
     search_gen: Cell<u64>,
+    // Títulos do cabeçalho, na ordem das colunas — âncora do campo de
+    // renomear e do menu de coluna aberto pelo cabeçalho.
+    titles: RefCell<Vec<gtk::Widget>>,
+    // Menu do botão direito no cabeçalho: o mesmo submenu "Coluna" das células.
+    header_menu: gtk::PopoverMenu,
 }
 
 impl DocumentView {
@@ -59,6 +72,8 @@ impl DocumentView {
             last_filter: RefCell::new(String::new()),
             generation: Cell::new(0),
             loading: Cell::new(false),
+            sort: RefCell::new(None),
+            unsorted: RefCell::new(None),
         });
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -173,6 +188,7 @@ impl DocumentView {
         // Submenu "Coluna": somar / adicionar / excluir
         let cols_menu = gio::Menu::new();
         cols_menu.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
+        cols_menu.append(Some(tr("ctx_col_rename")), Some("doc.col-rename"));
         cols_menu.append(Some(tr("ctx_col_add")), Some("doc.col-add"));
         cols_menu.append(Some(tr("ctx_col_delete")), Some("doc.col-delete"));
         menu_model.append_submenu(Some(tr("ctx_col_menu")), &cols_menu);
@@ -189,6 +205,22 @@ impl DocumentView {
         menu.set_has_arrow(false);
         menu.set_halign(gtk::Align::Start);
 
+        // Menu do cabeçalho: ações da coluna e, numa seção à parte, Somar —
+        // o mesmo arranjo do menu das células.
+        let header_model = gio::Menu::new();
+        let sec_col = gio::Menu::new();
+        sec_col.append(Some(tr("ctx_col_rename")), Some("doc.col-rename"));
+        sec_col.append(Some(tr("ctx_col_add")), Some("doc.col-add"));
+        sec_col.append(Some(tr("ctx_col_delete")), Some("doc.col-delete"));
+        header_model.append_section(None, &sec_col);
+        let sec_sum = gio::Menu::new();
+        sec_sum.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
+        header_model.append_section(None, &sec_sum);
+        let header_menu = gtk::PopoverMenu::from_model(Some(&header_model));
+        header_menu.set_parent(&colview);
+        header_menu.set_has_arrow(false);
+        header_menu.set_halign(gtk::Align::Start);
+
         let me = Rc::new(Self {
             root,
             state,
@@ -203,6 +235,8 @@ impl DocumentView {
             ctx_rowid: Cell::new(-1),
             ctx_col: Cell::new(0),
             search_gen: Cell::new(0),
+            titles: RefCell::new(Vec::new()),
+            header_menu,
         });
 
         // ações do menu de contexto
@@ -220,6 +254,7 @@ impl DocumentView {
         actions.add_action(&mk("row-move-up", Box::new(clone!(@strong me => move || me.ctx_move_row(true)))));
         actions.add_action(&mk("row-move-down", Box::new(clone!(@strong me => move || me.ctx_move_row(false)))));
         actions.add_action(&mk("col-sum", Box::new(clone!(@strong me => move || me.ctx_sum_column()))));
+        actions.add_action(&mk("col-rename", Box::new(clone!(@strong me => move || me.ctx_rename_column()))));
         actions.add_action(&mk("col-add", Box::new(clone!(@strong me => move || me.ctx_add_column()))));
         actions.add_action(&mk("col-delete", Box::new(clone!(@strong me => move || me.ctx_delete_column()))));
         me.root.insert_action_group("doc", Some(&actions));
@@ -535,6 +570,12 @@ impl DocumentView {
             .collect();
         let vis_names: Vec<String> = vis_idx.iter().map(|&i| res.columns[i].clone()).collect();
 
+        // Um resultado SQL traz a própria ordem (ORDER BY): começa sem
+        // ordenação de cabeçalho. A visão editável mantém a ordenação ativa.
+        *self.state.unsorted.borrow_mut() = None;
+        if !editable {
+            *self.state.sort.borrow_mut() = None;
+        }
         *self.state.columns.borrow_mut() = vis_names.clone();
         self.rebuild_columns(&vis_names);
 
@@ -548,6 +589,15 @@ impl DocumentView {
         // Invertemos uma vez (O(n)); depois consumimos com `pop()` (O(1) por
         // linha) para liberar memória progressivamente sem custo quadrático.
         let mut rows = res.rows;
+        let sort_col = self.state.sort.borrow().as_ref().and_then(|(name, asc)| {
+            vis_names.iter().position(|n| n == name).map(|p| (vis_idx[p], *asc))
+        });
+        if let Some((ci, asc)) = sort_col {
+            let mut keyed: Vec<(SortKey, Vec<String>)> =
+                rows.into_iter().map(|r| (sort_key(&r[ci]), r)).collect();
+            keyed.sort_by(|a, b| cmp_keys(&a.0, &b.0, asc));
+            rows = keyed.into_iter().map(|(_, r)| r).collect();
+        }
         rows.reverse();
 
         let store = self.store.clone();
@@ -841,18 +891,145 @@ impl DocumentView {
             self.colview.append_column(&column);
         }
 
-        // arma rename inline ao dar duplo-clique no cabeçalho de cada coluna
-        self.arm_header_rename();
+        self.update_sort_indicators();
+        // clique no cabeçalho ordena; duplo clique renomeia
+        self.arm_headers();
     }
 
-    /// Após (re)criar as colunas, percorre a árvore de widgets para localizar os
-    /// títulos de cabeçalho e arma o rename inline (duplo-clique → campo editável).
-    fn arm_header_rename(self: &Rc<Self>) {
-        let me = self.clone();
+    /// Após (re)criar as colunas, localiza os títulos de cabeçalho e arma o
+    /// clique (ordenar) e o botão direito (menu da coluna) de cada um.
+    fn arm_headers(self: &Rc<Self>) {
+        let me = Rc::downgrade(self);
         let colview = self.colview.clone();
         glib::idle_add_local_once(move || {
-            arm_titles(&colview.clone().upcast::<gtk::Widget>(), &me);
+            let Some(me) = me.upgrade() else { return };
+            let mut titles = Vec::new();
+            collect_titles(colview.upcast_ref(), &mut titles);
+            for (i, t) in titles.iter().enumerate() {
+                me.arm_title(t, i);
+            }
+            *me.titles.borrow_mut() = titles;
         });
+    }
+
+    fn arm_title(self: &Rc<Self>, title: &gtk::Widget, col: usize) {
+        // Ordena no "pressed": o cabeçalho do ColumnView tem um gesto de
+        // arrastar (redimensionar/reordenar) que reivindica a sequência, e aí
+        // o "released" nunca chega.
+        let click = gtk::GestureClick::new();
+        click.set_button(gdk::BUTTON_PRIMARY);
+        let me = Rc::downgrade(self);
+        click.connect_pressed(move |_, n_press, _, _| {
+            if n_press != 1 {
+                return;
+            }
+            if let Some(me) = me.upgrade() {
+                me.cycle_sort(col);
+            }
+        });
+        title.add_controller(click);
+
+        // Botão direito no cabeçalho: menu da coluna. O popover é único e
+        // preso à tabela — os títulos são recriados a cada recarga.
+        let right = gtk::GestureClick::new();
+        right.set_button(gdk::BUTTON_SECONDARY);
+        let me = Rc::downgrade(self);
+        right.connect_pressed(move |g, _, x, y| {
+            let Some(me) = me.upgrade() else { return };
+            g.set_state(gtk::EventSequenceState::Claimed);
+            me.ctx_col.set(col);
+            if let Some(p) = g.widget().and_then(|w| {
+                w.compute_point(&me.colview, &gtk::graphene::Point::new(x as f32, y as f32))
+            }) {
+                let rect = gdk::Rectangle::new(p.x() as i32, p.y() as i32, 1, 1);
+                me.header_menu.set_pointing_to(Some(&rect));
+            }
+            me.header_menu.popup();
+        });
+        title.add_controller(right);
+    }
+
+    /// Clique no cabeçalho: crescente → decrescente → ordem do documento.
+    fn cycle_sort(self: &Rc<Self>, col: usize) {
+        if self.state.loading.get() {
+            return;
+        }
+        let Some(name) = self.state.columns.borrow().get(col).cloned() else { return };
+        let next = match self.state.sort.borrow().clone() {
+            Some((n, true)) if n == name => Some((name, false)),
+            Some((n, false)) if n == name => None,
+            _ => Some((name, true)),
+        };
+        *self.state.sort.borrow_mut() = next;
+        self.update_sort_indicators();
+        self.sort_store();
+    }
+
+    /// Mostra ▲/▼ no título da coluna ordenada.
+    fn update_sort_indicators(&self) {
+        let sort = self.state.sort.borrow().clone();
+        let names = self.state.columns.borrow();
+        let cols = self.colview.columns();
+        for i in 0..cols.n_items() {
+            let (Some(obj), Some(name)) = (cols.item(i), names.get(i as usize)) else {
+                continue;
+            };
+            let title = match &sort {
+                Some((n, asc)) if n == name => format!("{name} {}", if *asc { "▲" } else { "▼" }),
+                _ => name.clone(),
+            };
+            obj.downcast::<gtk::ColumnViewColumn>().unwrap().set_title(Some(&title));
+        }
+    }
+
+    /// Reordena as linhas já carregadas conforme `state.sort`, numa única
+    /// troca do conteúdo do store — sem recarregar a tabela.
+    fn sort_store(&self) {
+        let n = self.store.n_items();
+        let rows: Vec<RowObject> = (0..n)
+            .filter_map(|i| self.store.item(i))
+            .map(|o| o.downcast::<RowObject>().unwrap())
+            .collect();
+        let editable = *self.state.editable.borrow();
+        let spec = self.state.sort.borrow().as_ref().and_then(|(name, asc)| {
+            self.state.columns.borrow().iter().position(|c| c == name).map(|c| (c, *asc))
+        });
+        let sorted: Vec<RowObject> = match spec {
+            Some((col, asc)) => {
+                if !editable && self.state.unsorted.borrow().is_none() {
+                    *self.state.unsorted.borrow_mut() = Some(rows.clone());
+                }
+                let mut keyed: Vec<(SortKey, RowObject)> =
+                    rows.into_iter().map(|r| (sort_key(&r.value(col)), r)).collect();
+                keyed.sort_by(|a, b| cmp_keys(&a.0, &b.0, asc));
+                keyed.into_iter().map(|(_, r)| r).collect()
+            }
+            None if editable => match self.state.dp.row_orders() {
+                Ok(ord) => {
+                    let mut rows = rows;
+                    let key = |r: &RowObject| ord.get(&r.rowid()).copied().unwrap_or(f64::MAX);
+                    rows.sort_by(|a, b| key(a).total_cmp(&key(b)));
+                    rows
+                }
+                Err(e) => {
+                    self.error(&format!("{}\n{e}", tr("error")));
+                    return;
+                }
+            },
+            None => self.state.unsorted.borrow_mut().take().unwrap_or(rows),
+        };
+        let selected = self.selection.selected_item().and_downcast::<RowObject>();
+        self.store.splice(0, n, &sorted);
+        if let Some(sel) = selected {
+            if let Some(pos) = sorted.iter().position(|r| *r == sel) {
+                self.selection.set_selected(pos as u32);
+                self.colview.scroll_to(pos as u32, None, gtk::ListScrollFlags::FOCUS, None);
+            }
+        }
+    }
+
+    fn is_sorted(&self) -> bool {
+        self.state.sort.borrow().is_some()
     }
 
     /// Abre um campo de edição inline ancorado no título da coluna.
@@ -1170,7 +1347,13 @@ impl DocumentView {
                 }
                 self.select_rowid(rowid);
             }
-            Change::RowAdded { rowid } => self.show_row_added(rowid),
+            Change::RowAdded { rowid } => {
+                self.show_row_added(rowid);
+                if self.is_sorted() {
+                    self.sort_store();
+                    self.select_rowid(rowid);
+                }
+            }
             Change::RowRemoved { rowid } => {
                 if let Some(pos) = self.row_position(rowid) {
                     self.store.remove(pos);
@@ -1188,6 +1371,9 @@ impl DocumentView {
                 };
                 self.store.splice(hi, 1, &[o_lo]);
                 self.store.splice(lo, 1, &[o_hi]);
+                if self.is_sorted() {
+                    self.sort_store();
+                }
                 self.select_rowid(a);
             }
             Change::ColumnAdded { index, name, values } => {
@@ -1370,6 +1556,12 @@ impl DocumentView {
         if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
         }
+        // Com a grade ordenada por uma coluna, a vizinha na tela não é a
+        // vizinha no documento: mover trocaria a linha com outra, invisível.
+        if self.is_sorted() {
+            self.status.set_text(tr("move_while_sorted"));
+            return;
+        }
         let rid = self.ctx_rowid.get();
         if rid < 0 {
             return;
@@ -1395,11 +1587,26 @@ impl DocumentView {
         }
     }
 
+    /// Abre o campo de renomear sobre o título da coluna do menu de contexto.
+    fn ctx_rename_column(self: &Rc<Self>) {
+        // Numa visão somente-leitura (resultado de SQL livre) as colunas
+        // exibidas podem não corresponder às da tabela.
+        if !*self.state.editable.borrow() || self.state.loading.get() {
+            return;
+        }
+        let col = self.ctx_col.get();
+        let name = self.state.columns.borrow().get(col).cloned();
+        let anchor = self.titles.borrow().get(col).cloned();
+        if let (Some(name), Some(anchor)) = (name, anchor) {
+            self.open_rename_popover(&anchor, &name);
+        }
+    }
+
     fn ctx_add_column(self: &Rc<Self>) {
         if !*self.state.editable.borrow() || self.state.loading.get() {
             return;
         }
-        // nome padrão único; o usuário renomeia inline depois (duplo-clique no cabeçalho)
+        // nome padrão único; o usuário renomeia depois (botão direito → Renomear coluna)
         let existing = self.state.columns.borrow().clone();
         let mut n = existing.len() + 1;
         let mut name = format!("coluna{n}");
@@ -1472,48 +1679,18 @@ impl DocumentView {
     }
 }
 
-/// Percorre recursivamente os widgets de cabeçalho (`GtkColumnViewTitle`) e
-/// arma o duplo-clique para edição inline do nome da coluna.
-fn arm_titles(w: &gtk::Widget, me: &Rc<DocumentView>) {
+/// Coleta, na ordem das colunas, os widgets de título do cabeçalho
+/// (`GtkColumnViewTitle`).
+fn collect_titles(w: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
     if w.type_().name() == "GtkColumnViewTitle" {
-        let title = w.clone();
-        let me2 = me.clone();
-        let gesture = gtk::GestureClick::new();
-        gesture.set_button(gdk::BUTTON_PRIMARY);
-        gesture.connect_pressed(move |_, n_press, _, _| {
-            if n_press != 2 {
-                return;
-            }
-            // Não permite renomear numa visão somente-leitura (resultado de SQL
-            // livre): as colunas exibidas podem não corresponder às da tabela.
-            if !*me2.state.editable.borrow() {
-                return;
-            }
-            let name = label_text(&title).unwrap_or_default();
-            me2.open_rename_popover(&title, &name);
-        });
-        w.add_controller(gesture);
+        out.push(w.clone());
+        return;
     }
     let mut child = w.first_child();
     while let Some(c) = child {
-        arm_titles(&c, me);
+        collect_titles(&c, out);
         child = c.next_sibling();
     }
-}
-
-/// Retorna o texto do primeiro `GtkLabel` descendente (o nome exibido da coluna).
-fn label_text(w: &gtk::Widget) -> Option<String> {
-    if let Ok(lbl) = w.clone().downcast::<gtk::Label>() {
-        return Some(lbl.text().to_string());
-    }
-    let mut child = w.first_child();
-    while let Some(c) = child {
-        if let Some(t) = label_text(&c) {
-            return Some(t);
-        }
-        child = c.next_sibling();
-    }
-    None
 }
 
 /// Formata número no padrão pt-BR: 1.234.567,89

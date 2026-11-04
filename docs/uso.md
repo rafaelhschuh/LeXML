@@ -8,6 +8,7 @@ Este guia descreve o comportamento da versão 0.5.4 do Lê-XML.
 - [Modos de visualização](#modos-de-visualização)
 - [Trabalhar com a tabela](#trabalhar-com-a-tabela)
 - [Desfazer e refazer](#desfazer-e-refazer)
+- [Ordenar por uma coluna](#ordenar-por-uma-coluna)
 - [Localizar valores](#localizar-valores)
 - [Filtrar com SQL WHERE](#filtrar-com-sql-where)
 - [Executar uma consulta SQL](#executar-uma-consulta-sql)
@@ -138,14 +139,19 @@ No submenu **Linha**:
 No submenu **Coluna**:
 
 - **Somar coluna** soma a coluna clicada;
+- **Renomear coluna…** abre o campo para trocar o nome da coluna;
 - **Adicionar coluna** cria ao final uma coluna vazia com nome automático;
 - **Excluir coluna** remove a coluna e seus valores.
+
+O botão direito no título de uma coluna abre esse mesmo menu de coluna.
 
 O documento sempre precisa manter pelo menos uma coluna.
 
 ### Renomear uma coluna
 
-Dê duplo clique no título da coluna, informe o novo nome e pressione `Enter`.
+Clique com o botão direito numa célula ou no título da coluna, escolha
+**Coluna → Renomear coluna…** (no título, **Renomear coluna…**), informe o novo
+nome e pressione `Enter`.
 A alteração atualiza tanto a tabela interna quanto o atributo `attrname` do
 `FIELD` ao salvar.
 
@@ -177,6 +183,33 @@ excluída volta na mesma posição, com seus atributos e valores.
   SQL livre está na tela; aplique o filtro novamente para voltar à visão
   editável.
 - O histórico não é salvo junto com o arquivo e se perde ao fechar a janela.
+
+## Ordenar por uma coluna
+
+Clique no título de uma coluna para ordenar a grade por ela. Cada clique
+avança um passo:
+
+1. crescente — o título ganha `▲`;
+2. decrescente — o título ganha `▼`;
+3. ordem do documento — a seta some.
+
+A comparação considera o conteúdo:
+
+- números comparam pelo valor, inclusive no formato brasileiro
+  (`9` vem antes de `10`, e `1.234,56` depois de `100.5`);
+- datas `dd/mm/aaaa` comparam no tempo;
+- o restante compara como texto, sem diferenciar maiúsculas;
+- células vazias ficam sempre no fim.
+
+A ordenação muda **só a exibição**. Salvar mantém a ordem das linhas do
+documento, e a exportação CSV também. Ela continua ativa ao aplicar outro
+filtro e é desfeita ao executar uma consulta SQL, que traz a própria ordem.
+
+Com a grade ordenada, **Mover para cima/baixo** fica indisponível: a linha
+vizinha na tela não é a vizinha no documento. Volte à ordem do documento para
+mover linhas.
+
+Para renomear a coluna, use o botão direito no título.
 
 ## Localizar valores
 
@@ -365,7 +398,8 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 | Navegar na grade | teclas de direção |
 | Confirmar edição e avançar | `Tab` |
 | Confirmar edição e voltar | `Shift+Tab` |
-| Renomear coluna | duplo clique no cabeçalho |
+| Ordenar pela coluna | clique no cabeçalho |
+| Renomear coluna | botão direito no cabeçalho → **Renomear coluna…** |
 | Abrir operações da tabela | botão direito em uma célula |
 
 ## Cuidados e limitações
