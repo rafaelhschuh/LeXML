@@ -4,8 +4,10 @@
 //!   salvas. Some quando o documento é salvo ou fechado normalmente; se o app
 //!   cair (queda de energia, travamento), sobra e é oferecida na próxima
 //!   abertura.
-//! - `versoes/`: cópia do arquivo em disco feita antes de cada salvamento
-//!   sobrescrevê-lo.
+//! - `versoes/`: histórico de cada arquivo. Guarda o que estava em disco
+//!   antes de cada salvamento e, durante a edição, um instantâneo a cada
+//!   poucos minutos. Cada cópia tem um `.info` ao lado dizendo de que arquivo
+//!   ela é, de quando e de que tipo.
 //!
 //! A limpeza apaga o que passou do prazo e, se a pasta ainda passar do
 //! tamanho máximo, os arquivos mais antigos primeiro.
@@ -157,19 +159,151 @@ pub fn orphans() -> Vec<Orphan> {
     out
 }
 
+/// De onde veio uma versão do histórico.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// O arquivo como estava em disco antes de um salvamento.
+    Saved,
+    /// Instantâneo de alterações ainda não salvas.
+    Editing,
+    /// O documento como estava antes de uma versão ser restaurada sobre ele.
+    BeforeRestore,
+}
+
+impl Kind {
+    fn code(self) -> &'static str {
+        match self {
+            Kind::Saved => "salvo",
+            Kind::Editing => "edicao",
+            Kind::BeforeRestore => "restauracao",
+        }
+    }
+
+    fn from_code(code: &str) -> Self {
+        match code {
+            "edicao" => Kind::Editing,
+            "restauracao" => Kind::BeforeRestore,
+            _ => Kind::Saved,
+        }
+    }
+}
+
+/// Uma cópia do histórico de um arquivo.
+#[derive(Clone, Debug)]
+pub struct Version {
+    pub data: PathBuf,
+    pub original: PathBuf,
+    pub name: String,
+    /// Quando aquele conteúdo existia (segundos Unix).
+    pub when: u64,
+    pub kind: Kind,
+    pub size: u64,
+}
+
+fn canon(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Nome livre em `versoes/` para uma cópia de `original`.
+fn version_path(original: &Path) -> PathBuf {
+    let dir = versions_dir();
+    let stem = original.file_stem().map_or("arquivo".into(), |s| s.to_string_lossy().into_owned());
+    let ext = original.extension().map_or("xml".into(), |s| s.to_string_lossy().into_owned());
+    let base = format!("{stem}_{}", stamp());
+    let mut path = dir.join(format!("{base}.{ext}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{base}-{n}.{ext}"));
+        n += 1;
+    }
+    path
+}
+
+fn version_info(original: &Path, when: u64, kind: Kind) -> String {
+    let name = original.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    format!(
+        "original={}\nname={}\nsaved={when}\nkind={}\n",
+        canon(original).to_string_lossy(),
+        name.replace('\n', " "),
+        kind.code()
+    )
+}
+
 /// Guarda uma cópia de `path` em `versoes/` antes de o salvamento
 /// sobrescrevê-lo. Falhas são ignoradas: o backup nunca impede o salvamento.
 pub fn save_version(path: &Path) {
-    if !path.is_file() {
+    let Ok(meta) = fs::metadata(path) else { return };
+    if !meta.is_file() {
         return;
     }
-    let dir = versions_dir();
-    if fs::create_dir_all(&dir).is_err() {
+    let when = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or_else(now_secs, |d| d.as_secs());
+    // esse conteúdo já está no histórico (salvou de novo sem mudar o arquivo)
+    if versions_of(path).iter().any(|v| v.kind == Kind::Saved && v.when == when) {
         return;
     }
-    let stem = path.file_stem().map_or("arquivo".into(), |s| s.to_string_lossy().into_owned());
-    let ext = path.extension().map_or("xml".into(), |s| s.to_string_lossy().into_owned());
-    let _ = fs::copy(path, dir.join(format!("{stem}_{}.{ext}", stamp())));
+    if fs::create_dir_all(versions_dir()).is_err() {
+        return;
+    }
+    let data = version_path(path);
+    if fs::copy(path, &data).is_ok() {
+        let _ = fs::write(data.with_extension("info"), version_info(path, when, Kind::Saved));
+    }
+}
+
+/// Guarda `bytes` (o documento em memória) no histórico de `original`.
+/// Bloqueia: chame fora da thread da interface, salvo em ações pontuais.
+pub fn save_snapshot(original: &Path, bytes: &[u8], kind: Kind) -> anyhow::Result<()> {
+    fs::create_dir_all(versions_dir())?;
+    let data = version_path(original);
+    crate::xmldoc::write_atomic(&data, bytes)?;
+    crate::xmldoc::write_atomic(&data.with_extension("info"), version_info(original, now_secs(), kind).as_bytes())
+}
+
+fn parse_version_info(text: &str) -> Option<(PathBuf, String, u64, Kind)> {
+    let (mut original, mut name, mut when, mut kind) = (None, String::new(), 0, Kind::Saved);
+    for line in text.lines() {
+        match line.split_once('=') {
+            Some(("original", v)) if !v.is_empty() => original = Some(PathBuf::from(v)),
+            Some(("name", v)) => name = v.to_string(),
+            Some(("saved", v)) => when = v.parse().unwrap_or(0),
+            Some(("kind", v)) => kind = Kind::from_code(v),
+            _ => {}
+        }
+    }
+    Some((original?, name, when, kind))
+}
+
+/// Histórico de `path`, da versão mais recente para a mais antiga.
+pub fn versions_of(path: &Path) -> Vec<Version> {
+    let Ok(entries) = fs::read_dir(versions_dir()) else {
+        return Vec::new();
+    };
+    let target = canon(path);
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let info = e.path();
+        if info.extension().is_none_or(|x| x != "info") {
+            continue;
+        }
+        let Some((original, name, when, kind)) =
+            fs::read_to_string(&info).ok().as_deref().and_then(parse_version_info)
+        else {
+            continue;
+        };
+        if original != target {
+            continue;
+        }
+        let ext = path.extension().map_or("xml".into(), |s| s.to_string_lossy().into_owned());
+        let data = info.with_extension(ext);
+        let Ok(meta) = fs::metadata(&data) else { continue };
+        out.push(Version { data, original, name, when, kind, size: meta.len() });
+    }
+    out.sort_by(|a, b| b.when.cmp(&a.when).then_with(|| b.data.cmp(&a.data)));
+    out
 }
 
 /// Arquivos de backup que a limpeza pode apagar: versões e cópias de
@@ -260,5 +394,14 @@ mod tests {
         let (_, _, _, original) = parse_meta("pid=1\noriginal=\n").unwrap();
         assert!(original.is_none(), "documento novo, nunca salvo");
         assert!(parse_meta("lixo").is_none());
+    }
+
+    #[test]
+    fn registro_de_versao_e_lido_de_volta() {
+        let text = version_info(Path::new("/nao/existe/dados.xml"), 1_700_000_000, Kind::Editing);
+        let (original, name, when, kind) = parse_version_info(&text).unwrap();
+        assert_eq!(original, PathBuf::from("/nao/existe/dados.xml"));
+        assert_eq!((name.as_str(), when, kind), ("dados.xml", 1_700_000_000, Kind::Editing));
+        assert!(parse_version_info("kind=salvo\n").is_none(), "sem arquivo de origem");
     }
 }

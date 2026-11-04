@@ -200,44 +200,13 @@ fn show_diff(
         .margin_end(12)
         .build();
 
-    let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let spinner = gtk::Spinner::new();
-    spinner.start();
-    head.append(&spinner);
-    let summary = gtk::Label::builder().label(tr("diff_loading")).xalign(0.0).wrap(true).build();
-    summary.add_css_class("heading");
-    head.append(&summary);
-    root.append(&head);
-    let legend = gtk::Label::builder().label(tr("diff_legend")).xalign(0.0).wrap(true).build();
-    legend.add_css_class("dim-label");
-    root.append(&legend);
-
-    let view = gtk::TextView::builder()
-        .editable(false)
-        .cursor_visible(false)
-        .monospace(true)
-        .wrap_mode(gtk::WrapMode::None)
-        .left_margin(8)
-        .top_margin(6)
-        .build();
-    let buffer = view.buffer();
-    let tag = |name: &str, bg: Option<&str>, dim: bool| {
-        let t = gtk::TextTag::new(Some(name));
-        if let Some(c) = bg.and_then(|c| gdk::RGBA::parse(c).ok()) {
-            t.set_paragraph_background_rgba(Some(&c));
-        }
-        if dim {
-            t.set_style(gtk::pango::Style::Italic);
-            t.set_foreground_rgba(gdk::RGBA::parse("rgba(128,128,128,0.9)").ok().as_ref());
-        }
-        buffer.tag_table().add(&t);
-    };
-    tag("add", Some("rgba(46,160,67,0.22)"), false);
-    tag("del", Some("rgba(220,53,69,0.22)"), false);
-    tag("gap", None, true);
-    let scroller = gtk::ScrolledWindow::builder().vexpand(true).child(&view).build();
-    scroller.add_css_class("frame");
-    root.append(&scroller);
+    let pane = DiffPane::new(DiffTexts {
+        legend: tr("diff_legend"),
+        added: tr("diff_added"),
+        removed: tr("diff_removed"),
+        same: tr("diff_same"),
+    });
+    root.append(&pane.root);
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
@@ -275,19 +244,97 @@ fn show_diff(
     let handle = gio::spawn_blocking(move || diff::diff_files(&before, &after).map_err(|e| e.to_string()));
     glib::spawn_future_local(async move {
         let res = handle.await.unwrap_or_else(|_| Err(String::new()));
-        spinner.stop();
-        spinner.set_visible(false);
+        pane.show(res);
+    });
+}
+
+/// Textos do resumo, que mudam conforme o que está sendo comparado.
+pub struct DiffTexts {
+    pub legend: &'static str,
+    pub added: &'static str,
+    pub removed: &'static str,
+    pub same: &'static str,
+}
+
+/// Resumo + lista de linhas com `+`/`−` coloridos, reaproveitado pela
+/// recuperação e pelo histórico de versões.
+pub struct DiffPane {
+    pub root: gtk::Box,
+    spinner: gtk::Spinner,
+    summary: gtk::Label,
+    buffer: gtk::TextBuffer,
+    texts: DiffTexts,
+}
+
+impl DiffPane {
+    pub fn new(texts: DiffTexts) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let spinner = gtk::Spinner::new();
+        head.append(&spinner);
+        let summary = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        summary.add_css_class("heading");
+        head.append(&summary);
+        root.append(&head);
+        let legend = gtk::Label::builder().label(texts.legend).xalign(0.0).wrap(true).build();
+        legend.add_css_class("dim-label");
+        root.append(&legend);
+
+        let view = gtk::TextView::builder()
+            .editable(false)
+            .cursor_visible(false)
+            .monospace(true)
+            .wrap_mode(gtk::WrapMode::None)
+            .left_margin(8)
+            .top_margin(6)
+            .build();
+        let buffer = view.buffer();
+        let tag = |name: &str, bg: Option<&str>, dim: bool| {
+            let t = gtk::TextTag::new(Some(name));
+            if let Some(c) = bg.and_then(|c| gdk::RGBA::parse(c).ok()) {
+                t.set_paragraph_background_rgba(Some(&c));
+            }
+            if dim {
+                t.set_style(gtk::pango::Style::Italic);
+                t.set_foreground_rgba(gdk::RGBA::parse("rgba(128,128,128,0.9)").ok().as_ref());
+            }
+            buffer.tag_table().add(&t);
+        };
+        tag("add", Some("rgba(46,160,67,0.22)"), false);
+        tag("del", Some("rgba(220,53,69,0.22)"), false);
+        tag("gap", None, true);
+        let scroller = gtk::ScrolledWindow::builder().vexpand(true).hexpand(true).child(&view).build();
+        scroller.add_css_class("frame");
+        root.append(&scroller);
+
+        let pane = Self { root, spinner, summary, buffer, texts };
+        pane.loading();
+        pane
+    }
+
+    /// Limpa a lista e mostra "Comparando…".
+    pub fn loading(&self) {
+        self.buffer.set_text("");
+        self.spinner.set_visible(true);
+        self.spinner.start();
+        self.summary.set_text(tr("diff_loading"));
+    }
+
+    pub fn show(&self, res: Result<diff::Diff, String>) {
+        self.spinner.stop();
+        self.spinner.set_visible(false);
+        self.buffer.set_text("");
         let d = match res {
             Ok(d) => d,
             Err(e) => {
-                summary.set_text(&format!("{}\n{e}", tr("diff_error")));
+                self.summary.set_text(&format!("{}\n{e}", tr("diff_error")));
                 return;
             }
         };
         let mut head_text = if d.added == 0 && d.removed == 0 && d.columns_before == d.columns_after {
-            tr("diff_same").to_string()
+            self.texts.same.to_string()
         } else {
-            format!("{} {}  ·  {} {}", d.added, tr("diff_added"), d.removed, tr("diff_removed"))
+            format!("{} {}  ·  {} {}", d.added, self.texts.added, d.removed, self.texts.removed)
         };
         if d.columns_before != d.columns_after {
             head_text.push_str(&format!(
@@ -300,8 +347,9 @@ fn show_diff(
         if d.truncated {
             head_text.push_str(&format!("\n{}", tr("diff_truncated")));
         }
-        summary.set_text(&head_text);
+        self.summary.set_text(&head_text);
 
+        let buffer = &self.buffer;
         let mut end = buffer.end_iter();
         for (t, text) in &d.lines {
             let (line, tag) = match t {
@@ -315,5 +363,5 @@ fn show_diff(
                 None => buffer.insert(&mut end, &line),
             }
         }
-    });
+    }
 }

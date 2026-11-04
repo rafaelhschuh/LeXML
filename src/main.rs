@@ -11,6 +11,7 @@ mod replace;
 mod rowclip;
 mod backup;
 mod diff;
+mod history;
 mod recovery;
 mod row_object;
 

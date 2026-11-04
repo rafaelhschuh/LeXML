@@ -1,6 +1,7 @@
-//! Diferença, linha a linha, entre o arquivo em disco e uma cópia de
-//! recuperação. Cada linha da tabela vira o seu `<ROW .../>`, e as duas
-//! listas são comparadas como texto.
+//! Diferença, linha a linha, entre duas versões de uma tabela (arquivo em
+//! disco, cópia de recuperação, versão do histórico ou o documento aberto).
+//! Cada linha da tabela vira o seu `<ROW .../>`, e as duas listas são
+//! comparadas como texto.
 
 use crate::rowclip::rows_to_xml;
 use crate::xmldoc::XmlDoc;
@@ -35,24 +36,42 @@ const MAX_LINES: usize = 20_000;
 /// ficaria lenta demais; usa-se a comparação por conteúdo.
 const LCS_LIMIT: usize = 4_000_000;
 
+/// Uma linha de texto por linha da tabela. `rows` vem de `XmlDoc::filter`,
+/// cuja primeira coluna é o rowid interno.
+pub fn lines_of(names: &[String], rows: &[Vec<String>]) -> Vec<String> {
+    rows.iter()
+        .map(|r| rows_to_xml(names, &[r[1..].to_vec()]).trim_end().to_string())
+        .collect()
+}
+
 fn row_lines(path: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let dp = XmlDoc::open(path)?;
     let names = dp.field_names();
     let res = dp.filter(None)?;
-    // a primeira coluna do resultado é o rowid interno
-    let lines = res
-        .rows
-        .into_iter()
-        .map(|r| rows_to_xml(&names, &[r[1..].to_vec()]).trim_end().to_string())
-        .collect();
+    let lines = lines_of(&names, &res.rows);
     Ok((names, lines))
 }
 
 /// Compara o arquivo em disco (`before`) com a cópia recuperada (`after`).
 pub fn diff_files(before: &Path, after: &Path) -> Result<Diff> {
     let (columns_before, a) = row_lines(before)?;
+    diff_against(columns_before, &a, after)
+}
+
+/// Compara o arquivo `before` com linhas já montadas (`columns_after`, `b`):
+/// o que mudou desde aquela versão.
+pub fn diff_since(before: &Path, columns_after: Vec<String>, b: &[String]) -> Result<Diff> {
+    let (columns_before, a) = row_lines(before)?;
+    build(columns_before, &a, columns_after, b)
+}
+
+fn diff_against(columns_before: Vec<String>, a: &[String], after: &Path) -> Result<Diff> {
     let (columns_after, b) = row_lines(after)?;
-    let ops = diff_lines(&a, &b);
+    build(columns_before, a, columns_after, &b)
+}
+
+fn build(columns_before: Vec<String>, a: &[String], columns_after: Vec<String>, b: &[String]) -> Result<Diff> {
+    let ops = diff_lines(a, b);
     let added = ops.iter().filter(|(t, _)| *t == Tag::Added).count();
     let removed = ops.iter().filter(|(t, _)| *t == Tag::Removed).count();
     let (lines, truncated) = collapse(ops);

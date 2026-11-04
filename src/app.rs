@@ -94,6 +94,16 @@ impl TitleWidget {
     }
 }
 
+/// De onde vem o conteúdo aberto por `open_into`.
+enum Source {
+    /// O próprio arquivo em disco.
+    File,
+    /// Cópia de recuperação deixada por uma sessão que caiu.
+    Recovery(backup::Orphan),
+    /// Versão do histórico restaurada sobre o documento.
+    Version(backup::Version),
+}
+
 /// O que carregar ao criar a janela.
 pub enum Initial {
     Empty,
@@ -321,7 +331,7 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         Initial::Open(path) => open_checked(&path, &window, &stack, &current, &title),
         Initial::Recover(orphan) => {
             let data = orphan.data.clone();
-            open_into(&data, &window, &stack, &current, &title, Some(orphan));
+            open_into(&data, &window, &stack, &current, &title, Source::Recovery(orphan));
         }
         Initial::Blank => blank_into(&window, &stack, &current, &title),
         Initial::Empty => {}
@@ -375,7 +385,7 @@ fn open_checked(
         .into_iter()
         .find(|o| o.original.as_deref().map(canon).as_ref() == Some(&target));
     let Some(orphan) = found else {
-        open_into(path, window, stack, current, title, None);
+        open_into(path, window, stack, current, title, Source::File);
         return;
     };
     CLAIMED.with(|c| c.borrow_mut().insert(orphan.data.clone()));
@@ -387,7 +397,7 @@ fn open_checked(
         Rc::new(move |o: backup::Orphan| {
             restored.set(true);
             let data = o.data.clone();
-            open_into(&data, &window, &stack, &current, &title, Some(o));
+            open_into(&data, &window, &stack, &current, &title, Source::Recovery(o));
         })
     };
     // Descartar ou decidir depois: abre o arquivo como está em disco.
@@ -396,7 +406,7 @@ fn open_checked(
         let path = path.to_path_buf();
         Box::new(move || {
             if !restored.get() {
-                open_into(&path, &window, &stack, &current, &title, None);
+                open_into(&path, &window, &stack, &current, &title, Source::File);
             }
         })
     };
@@ -614,6 +624,19 @@ fn install_doc(
     }
     let widget = doc.widget();
     stack.add_named(&widget, Some("doc"));
+    if let OpenDoc::Table(view) = &doc {
+        // Restaurar uma versão do histórico troca o documento desta janela.
+        let (window, stack, current, title) =
+            (window.downgrade(), stack.downgrade(), Rc::downgrade(current), title.clone());
+        view.set_restore_handler(Rc::new(move |v: backup::Version| {
+            let (Some(window), Some(stack), Some(current)) = (window.upgrade(), stack.upgrade(), current.upgrade())
+            else {
+                return;
+            };
+            let data = v.data.clone();
+            open_into(&data, &window, &stack, &current, &title, Source::Version(v));
+        }));
+    }
     *current.borrow_mut() = Some(doc);
 
     if reveal {
@@ -673,11 +696,12 @@ fn open_into(
     stack: &gtk::Stack,
     current: &Rc<RefCell<Option<OpenDoc>>>,
     title: &TitleWidget,
-    recover: Option<backup::Orphan>,
+    source: Source,
 ) {
-    let label = match &recover {
-        Some(o) => format!("{} ({})", o.name, tr("recovered")),
-        None => path
+    let label = match &source {
+        Source::Recovery(o) => format!("{} ({})", o.name, tr("recovered")),
+        Source::Version(v) => format!("{} ({} {})", v.name, tr("version_of"), crate::history::format_when(v.when)),
+        Source::File => path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "arquivo".into()),
@@ -715,18 +739,24 @@ fn open_into(
             Ok(Loaded::Table(dp, initial)) => {
                 // Na recuperação, o documento "é" o arquivo de origem (Salvar
                 // grava nele), não a cópia que está no cache.
-                let view_path = match &recover {
-                    Some(o) => o.original.clone().unwrap_or_else(|| PathBuf::from(&o.name)),
-                    None => {
+                let view_path = match &source {
+                    Source::Recovery(o) => o.original.clone().unwrap_or_else(|| PathBuf::from(&o.name)),
+                    Source::Version(v) => v.original.clone(),
+                    Source::File => {
                         recent::add(&path_ui);
                         path_ui.clone()
                     }
                 };
                 let view = DocumentView::new(dp, view_path);
-                if let Some(o) = &recover {
-                    view.mark_recovered();
-                    // o conteúdo está na memória e entra na cópia desta sessão
-                    o.discard();
+                match &source {
+                    Source::Recovery(o) => {
+                        view.mark_recovered(tr("recovered_status"));
+                        // o conteúdo está na memória e entra na cópia desta sessão
+                        o.discard();
+                    }
+                    // a versão continua no histórico
+                    Source::Version(_) => view.mark_recovered(tr("restored_status")),
+                    Source::File => {}
                 }
                 // Instala a tabela mas mantém o spinner até a carga terminar.
                 install_doc(

@@ -453,8 +453,30 @@ O Lê-XML guarda backups fora da pasta do arquivo, em
   última edição; uma sequência rápida de edições vira uma gravação só). A
   cópia é gravada em segundo plano, sem travar a janela, e é apagada quando o
   documento é salvo ou fechado normalmente.
-- **Versões** (`versoes/`) — antes de cada salvamento sobrescrever um arquivo,
-  a versão que estava em disco é copiada como `nome_AAAAMMDD-HHMMSS.xml`.
+- **Versões** (`versoes/`) — o histórico de cada arquivo. Antes de cada
+  salvamento sobrescrever o arquivo, a versão que estava em disco é copiada
+  (salvar de novo sem mudar nada não duplica a cópia). Durante a edição, a
+  cada 5 minutos com alterações, um instantâneo do documento também entra no
+  histórico, mesmo sem salvar.
+
+### Histórico de versões
+
+O botão de relógio na barra de ferramentas abre o histórico do arquivo:
+à esquerda, as versões da mais recente para a mais antiga, cada uma com data,
+hora e tipo (**Como estava salvo**, **Edição não salva** ou **Antes de
+restaurar outra versão**); à direita, o que mudou da versão escolhida até o
+documento como está agora, inclusive alterações ainda não salvas — em
+vermelho (`−`) o que estava na versão e foi apagado, em verde (`+`) o que
+entrou depois dela.
+
+**Restaurar esta versão** troca o documento da janela pela versão, com
+"(versão de …)" no título. Ele fica marcado como alterado: **Salvar** grava
+no arquivo de origem. Se havia alterações não salvas, elas não se perdem —
+antes de restaurar, o estado atual entra no histórico como **Antes de
+restaurar outra versão**.
+
+O histórico é guardado por arquivo: um documento novo só passa a ter versões
+depois de salvo.
 
 ### Recuperar depois de uma queda
 

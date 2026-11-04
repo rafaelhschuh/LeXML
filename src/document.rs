@@ -41,6 +41,9 @@ struct State {
     unsorted: RefCell<Option<Vec<RowObject>>>,
 }
 
+/// Intervalo mínimo entre instantâneos do histórico durante a edição.
+const SNAPSHOT_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 pub struct DocumentView {
     pub root: gtk::Box,
     state: Rc<State>,
@@ -83,6 +86,10 @@ pub struct DocumentView {
     backup_gen: Cell<u64>,
     // Referência fraca a si mesmo, para agendar a cópia a partir de `&self`.
     weak_self: RefCell<std::rc::Weak<Self>>,
+    // Último instantâneo do histórico de versões tirado durante a edição.
+    last_snapshot: Cell<std::time::Instant>,
+    // Quem troca o documento da janela por uma versão restaurada (`app`).
+    restore_handler: RefCell<Option<Rc<dyn Fn(crate::backup::Version)>>>,
     busy_shade: gtk::Box,
     busy_spinner: gtk::Spinner,
     busy_label: gtk::Label,
@@ -185,6 +192,10 @@ impl DocumentView {
         let csv_btn = gtk::Button::from_icon_name("x-office-spreadsheet-symbolic");
         csv_btn.set_tooltip_text(Some(tr("csv_tooltip")));
         bar.append(&csv_btn);
+
+        let history_btn = gtk::Button::from_icon_name("document-open-recent-symbolic");
+        history_btn.set_tooltip_text(Some(tr("history_tooltip")));
+        bar.append(&history_btn);
 
         // Ícone de disquete: padrão universal de "salvar".
         let save_btn = gtk::Button::from_icon_name("media-floppy-symbolic");
@@ -397,6 +408,8 @@ impl DocumentView {
             backup_writing: Cell::new(false),
             backup_gen: Cell::new(0),
             weak_self: RefCell::new(std::rc::Weak::new()),
+            last_snapshot: Cell::new(std::time::Instant::now()),
+            restore_handler: RefCell::new(None),
             busy_shade,
             busy_spinner,
             busy_label,
@@ -574,6 +587,7 @@ impl DocumentView {
         sql_btn.connect_clicked(clone!(@strong me => move |_| me.open_sql_dialog()));
         sum_btn.connect_clicked(clone!(@strong me => move |_| me.do_sum()));
         save_btn.connect_clicked(clone!(@strong me => move |_| me.do_save()));
+        history_btn.connect_clicked(clone!(@strong me => move |_| me.show_history()));
         csv_btn.connect_clicked(clone!(@strong me => move |_| me.do_export_csv()));
 
         // Busca com debounce: cada tecla agenda a busca ~250 ms depois; teclas
@@ -1949,8 +1963,19 @@ impl DocumentView {
             .unwrap_or(&self.state.path)
             .file_name()
             .map_or_else(|| "novo.xml".into(), |s| s.to_string_lossy().into_owned());
+        // De tempos em tempos a cópia também entra no histórico de versões,
+        // para dar para voltar a um ponto da edição mesmo sem ter salvo.
+        let snapshot = original
+            .clone()
+            .filter(|_| self.last_snapshot.get().elapsed() >= SNAPSHOT_EVERY);
+        if snapshot.is_some() {
+            self.last_snapshot.set(std::time::Instant::now());
+        }
         self.backup_writing.set(true);
         let handle = gio::spawn_blocking(move || {
+            if let Some(path) = &snapshot {
+                let _ = crate::backup::save_snapshot(path, xml.as_bytes(), crate::backup::Kind::Editing);
+            }
             crate::backup::Recovery::write(&data, &meta, xml.as_bytes(), original.as_deref(), &name)
                 .is_ok()
         });
@@ -1978,11 +2003,73 @@ impl DocumentView {
         self.recovery.remove();
     }
 
-    /// Documento aberto a partir de uma cópia de recuperação: fica marcado
-    /// como alterado, para o usuário salvar.
-    pub fn mark_recovered(&self) {
+    /// Documento aberto a partir de uma cópia de recuperação ou de uma versão
+    /// do histórico: fica marcado como alterado, para o usuário salvar.
+    pub fn mark_recovered(&self, message: &str) {
         self.mark_dirty();
-        self.status.set_text(tr("recovered_status"));
+        self.status.set_text(message);
+    }
+
+    /// Define quem troca o documento da janela por uma versão restaurada.
+    pub fn set_restore_handler(&self, handler: Rc<dyn Fn(crate::backup::Version)>) {
+        *self.restore_handler.borrow_mut() = Some(handler);
+    }
+
+    /// Abre o histórico de versões do arquivo, comparando cada uma com o
+    /// documento como está agora (inclusive alterações não salvas).
+    fn show_history(self: &Rc<Self>) {
+        if self.busy.get() {
+            return;
+        }
+        let Some(path) = self.state.saved_path.borrow().clone() else {
+            self.info(tr("history_title"), tr("history_unsaved_doc"));
+            return;
+        };
+        let versions = crate::backup::versions_of(&path);
+        if versions.is_empty() {
+            self.info(tr("history_title"), tr("history_empty"));
+            return;
+        }
+        self.commit_pending_edit();
+        let rows = match self.state.dp.filter(None) {
+            Ok(r) => r.rows,
+            Err(e) => {
+                self.error(&e.to_string());
+                return;
+            }
+        };
+        let current = crate::history::Current::new(self.state.dp.field_names(), rows);
+        let name = path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        let weak = Rc::downgrade(self);
+        crate::history::show(
+            self.window().as_ref(),
+            &name,
+            versions,
+            current,
+            Rc::new(move |v| {
+                if let Some(me) = weak.upgrade() {
+                    me.restore_version(v);
+                }
+            }),
+        );
+    }
+
+    /// Troca o documento pela versão `v`. Alterações não salvas não se
+    /// perdem: antes, o estado atual entra no histórico.
+    fn restore_version(self: &Rc<Self>, v: crate::backup::Version) {
+        let Some(handler) = self.restore_handler.borrow().clone() else { return };
+        if self.is_dirty() {
+            let saved = self.state.dp.to_xml().map_err(|e| e.to_string()).and_then(|xml| {
+                crate::backup::save_snapshot(&v.original, xml.as_bytes(), crate::backup::Kind::BeforeRestore)
+                    .map_err(|e| e.to_string())
+            });
+            if let Err(e) = saved {
+                self.error(&format!("{}\n{e}", tr("history_snapshot_error")));
+                return;
+            }
+        }
+        self.discard_backup();
+        handler(v);
     }
 
     fn mark_dirty(&self) {
