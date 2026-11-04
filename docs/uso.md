@@ -574,19 +574,46 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 
 ## Atalhos
 
+Os atalhos de ação podem ser trocados em **Configurações → Atalhos**: clique
+em **Alterar** e pressione a nova combinação (`Esc` cancela). **Sem atalho**
+deixa a ação sem tecla, **Padrão** volta ao original e **Restaurar todos os
+padrões** desfaz todas as mudanças. Se a combinação já era de outra ação, ela
+sai de lá, e a aba avisa de qual. As mudanças ficam em
+`~/.config/lexml/atalhos.ini` e valem na hora em todas as janelas; o menu de
+contexto mostra os atalhos novos nos documentos abertos depois da mudança.
+
+Os atalhos que agem sobre a tabela (copiar, colar, apagar, mover…), e os de
+tecla sem `Ctrl` ou `Alt`, não valem enquanto uma célula está em edição ou um
+campo de texto tem o foco: lá as teclas continuam editando o texto.
+
+Atalhos padrão das ações configuráveis:
+
 | Ação | Atalho |
 | --- | --- |
 | Salvar | `Ctrl+S` |
 | Salvar como | `Ctrl+Shift+S` |
-| Selecionar todas as linhas | `Ctrl+A` |
-| Copiar / recortar / colar linhas | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
-| Estender a seleção | `Shift+↑` / `Shift+↓`, `Shift`+clique |
-| Marcar linhas soltas | `Ctrl`+clique |
-| Limpar células selecionadas | `Backspace` |
-| Excluir linhas selecionadas | `Delete` |
 | Desfazer | `Ctrl+Z` |
 | Refazer | `Ctrl+Shift+Z` ou `Ctrl+Y` |
 | Ir para Localizar | `Ctrl+F` |
+| Abrir/fechar Substituir | `Ctrl+H` |
+| Histórico de versões | `Ctrl+Shift+H` |
+| Consulta SQL | sem atalho |
+| Selecionar todas as linhas | `Ctrl+A` |
+| Copiar / recortar / colar linhas | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
+| Limpar células selecionadas | `Backspace` |
+| Excluir linhas selecionadas | `Delete` |
+| Inserir linha abaixo / acima | `Ctrl+Enter` / `Ctrl+Shift+Enter` |
+| Duplicar linha | `Ctrl+D` |
+| Mover linha para cima / baixo | `Alt+↑` / `Alt+↓` |
+
+As ações de linha (inserir, duplicar, mover) usam a linha do cursor.
+
+Teclas fixas:
+
+| Ação | Atalho |
+| --- | --- |
+| Estender a seleção | `Shift+↑` / `Shift+↓`, `Shift`+clique |
+| Marcar linhas soltas | `Ctrl`+clique |
 | Próxima ocorrência em Localizar | `Enter` |
 | Abrir/fechar Substituir | `Ctrl+H` |
 | Substituir e ir para a próxima | `Enter` em **Substituir por…** |

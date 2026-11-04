@@ -12,6 +12,7 @@ mod rowclip;
 mod backup;
 mod diff;
 mod history;
+mod shortcuts;
 mod recovery;
 mod row_object;
 

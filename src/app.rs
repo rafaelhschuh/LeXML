@@ -871,6 +871,116 @@ fn apply_theme(scheme: &str) {
     }
 }
 
+/// Pede o novo atalho de `action`: a próxima tecla pressionada (com os
+/// modificadores) vira o atalho. Esc cancela.
+fn capture_shortcut(
+    parent: &gtk::Window,
+    action: &'static crate::shortcuts::Action,
+    refresh: Rc<dyn Fn()>,
+    note: gtk::Label,
+) {
+    let win = gtk::Window::builder()
+        .title(tr("sc_change"))
+        .transient_for(parent)
+        .modal(true)
+        .resizable(false)
+        .default_width(380)
+        .build();
+    let root = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .margin_top(18)
+        .margin_bottom(18)
+        .margin_start(18)
+        .margin_end(18)
+        .build();
+    let heading = gtk::Label::builder()
+        .label(format!("{} «{}»", tr("sc_press"), tr(action.label)))
+        .wrap(true)
+        .xalign(0.0)
+        .build();
+    heading.add_css_class("heading");
+    root.append(&heading);
+    let current = gtk::Label::builder()
+        .label(format!("{}: {}", tr("sc_current"), {
+            let l = crate::shortcuts::label(action.id);
+            if l.is_empty() { tr("sc_none").to_string() } else { l }
+        }))
+        .xalign(0.0)
+        .build();
+    current.add_css_class("dim-label");
+    root.append(&current);
+    let hint = gtk::Label::builder().label(tr("sc_press_hint")).xalign(0.0).build();
+    hint.add_css_class("dim-label");
+    root.append(&hint);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    buttons.set_margin_top(6);
+    let none_btn = gtk::Button::with_label(tr("sc_none"));
+    let default_btn = gtk::Button::with_label(tr("sc_default"));
+    let cancel_btn = gtk::Button::with_label(tr("cancel"));
+    for b in [&none_btn, &default_btn, &cancel_btn] {
+        // os botões não pegam o foco: Enter e Espaço também podem virar atalho
+        b.set_focus_on_click(false);
+        b.set_can_focus(false);
+        buttons.append(b);
+    }
+    root.append(&buttons);
+
+    let done = {
+        let (win, refresh) = (win.clone(), refresh.clone());
+        move || {
+            refresh();
+            win.close();
+        }
+    };
+    {
+        let (done, note) = (done.clone(), note.clone());
+        none_btn.connect_clicked(move |_| {
+            crate::shortcuts::set(action.id, Vec::new());
+            note.set_text("");
+            done();
+        });
+    }
+    {
+        let (done, note) = (done.clone(), note.clone());
+        default_btn.connect_clicked(move |_| {
+            crate::shortcuts::reset(action.id);
+            note.set_text("");
+            done();
+        });
+    }
+    {
+        let win = win.clone();
+        cancel_btn.connect_clicked(move |_| win.close());
+    }
+
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let win = win.clone();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if key == gtk::gdk::Key::Escape {
+                win.close();
+                return glib::Propagation::Stop;
+            }
+            let Some(accel) = crate::shortcuts::from_event(key, state) else {
+                return glib::Propagation::Stop; // só o modificador, ainda
+            };
+            match crate::shortcuts::assign(action.id, &accel) {
+                Some(other) => note.set_text(&format!("{} «{}».", tr("sc_moved"), tr(other.label))),
+                None => note.set_text(""),
+            }
+            done();
+            glib::Propagation::Stop
+        });
+    }
+    win.add_controller(keys);
+    win.set_child(Some(&root));
+    win.present();
+}
+
 /// Janela de configurações FLUTUANTE com abas (Notebook), em GTK4 puro.
 fn show_settings(parent: &gtk::ApplicationWindow) {
     let cfg = config::load();
@@ -880,8 +990,8 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
         .transient_for(parent)
         .modal(true)
         .resizable(false)
-        .default_width(460)
-        .default_height(420)
+        .default_width(520)
+        .default_height(460)
         .build();
 
     let notebook = gtk::Notebook::new();
@@ -987,6 +1097,73 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
     }
 
     notebook.append_page(&bk, Some(&gtk::Label::new(Some(tr("backup")))));
+
+    // ---------- Aba: Atalhos ----------
+    let sc = settings_page();
+    let sc_list = gtk::ListBox::new();
+    sc_list.set_selection_mode(gtk::SelectionMode::None);
+    sc_list.add_css_class("frame");
+    let sc_values: Rc<Vec<(&'static str, gtk::Label)>> = Rc::new(
+        crate::shortcuts::ACTIONS
+            .iter()
+            .map(|a| (a.id, gtk::Label::builder().xalign(1.0).build()))
+            .collect(),
+    );
+    let sc_note = gtk::Label::builder().wrap(true).xalign(0.0).build();
+    sc_note.add_css_class("dim-label");
+    let refresh_sc: Rc<dyn Fn()> = {
+        let sc_values = sc_values.clone();
+        Rc::new(move || {
+            for (id, l) in sc_values.iter() {
+                let text = crate::shortcuts::label(id);
+                l.set_text(if text.is_empty() { tr("sc_none") } else { &text });
+            }
+        })
+    };
+    refresh_sc();
+    for (action, (_, value)) in crate::shortcuts::ACTIONS.iter().zip(sc_values.iter()) {
+        let line = gtk::Box::builder()
+            .spacing(12)
+            .margin_top(4)
+            .margin_bottom(4)
+            .margin_start(10)
+            .margin_end(6)
+            .build();
+        let name = gtk::Label::builder().label(tr(action.label)).xalign(0.0).hexpand(true).build();
+        value.add_css_class("dim-label");
+        let change = gtk::Button::with_label(tr("sc_change"));
+        change.add_css_class("flat");
+        {
+            let (win, refresh_sc, sc_note) = (win.clone(), refresh_sc.clone(), sc_note.clone());
+            change.connect_clicked(move |_| capture_shortcut(&win, action, refresh_sc.clone(), sc_note.clone()));
+        }
+        line.append(&name);
+        line.append(value);
+        line.append(&change);
+        sc_list.append(&line);
+    }
+    let sc_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_height(260)
+        .vexpand(true)
+        .child(&sc_list)
+        .build();
+    sc.append(&sc_scroll);
+    let sc_hint = gtk::Label::builder().label(tr("sc_hint")).wrap(true).xalign(0.0).build();
+    sc_hint.add_css_class("dim-label");
+    sc.append(&sc_hint);
+    sc.append(&sc_note);
+    let sc_reset = gtk::Button::builder().label(tr("sc_reset_all")).halign(gtk::Align::Start).build();
+    {
+        let (refresh_sc, sc_note) = (refresh_sc.clone(), sc_note.clone());
+        sc_reset.connect_clicked(move |_| {
+            crate::shortcuts::reset_all();
+            sc_note.set_text("");
+            refresh_sc();
+        });
+    }
+    sc.append(&sc_reset);
+    notebook.append_page(&sc, Some(&gtk::Label::new(Some(tr("shortcuts")))));
 
     // ---------- Aba: Sobre ----------
     let sobre = settings_page();

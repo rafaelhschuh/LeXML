@@ -41,6 +41,15 @@ struct State {
     unsorted: RefCell<Option<Vec<RowObject>>>,
 }
 
+/// Item do menu de contexto com o atalho configurado ao lado.
+fn menu_item(label: &str, action: &str, shortcut: &str) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(tr(label)), Some(action));
+    if let Some(accel) = crate::shortcuts::menu_accel(shortcut) {
+        item.set_attribute_value("accel", Some(&accel.to_variant()));
+    }
+    item
+}
+
 /// Intervalo mínimo entre instantâneos do histórico durante a edição.
 const SNAPSHOT_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
@@ -317,26 +326,22 @@ impl DocumentView {
         // Submenu "Linha": copiar / inserir / clonar / mover / excluir
         let rows_menu = gio::Menu::new();
         let sec_copy = gio::Menu::new();
-        let copy_item = gio::MenuItem::new(Some(tr("ctx_row_copy")), Some("doc.row-copy"));
-        copy_item.set_attribute_value("accel", Some(&"<Control>c".to_variant()));
-        sec_copy.append_item(&copy_item);
+        sec_copy.append_item(&menu_item("ctx_row_copy", "doc.row-copy", "copy"));
         rows_menu.append_section(None, &sec_copy);
         let sec_insert = gio::Menu::new();
-        sec_insert.append(Some(tr("ctx_row_above")), Some("doc.row-above"));
-        sec_insert.append(Some(tr("ctx_row_below")), Some("doc.row-below"));
+        sec_insert.append_item(&menu_item("ctx_row_above", "doc.row-above", "row_above"));
+        sec_insert.append_item(&menu_item("ctx_row_below", "doc.row-below", "row_below"));
         rows_menu.append_section(None, &sec_insert);
         let sec_clone = gio::Menu::new();
         sec_clone.append(Some(tr("ctx_row_clone_above")), Some("doc.row-clone-above"));
-        sec_clone.append(Some(tr("ctx_row_clone_below")), Some("doc.row-clone-below"));
+        sec_clone.append_item(&menu_item("ctx_row_clone_below", "doc.row-clone-below", "row_clone"));
         rows_menu.append_section(None, &sec_clone);
         let sec_move = gio::Menu::new();
-        sec_move.append(Some(tr("ctx_row_move_up")), Some("doc.row-move-up"));
-        sec_move.append(Some(tr("ctx_row_move_down")), Some("doc.row-move-down"));
+        sec_move.append_item(&menu_item("ctx_row_move_up", "doc.row-move-up", "move_up"));
+        sec_move.append_item(&menu_item("ctx_row_move_down", "doc.row-move-down", "move_down"));
         rows_menu.append_section(None, &sec_move);
         let sec_row_del = gio::Menu::new();
-        let del_item = gio::MenuItem::new(Some(tr("ctx_row_delete")), Some("doc.row-delete"));
-        del_item.set_attribute_value("accel", Some(&"Delete".to_variant()));
-        sec_row_del.append_item(&del_item);
+        sec_row_del.append_item(&menu_item("ctx_row_delete", "doc.row-delete", "delete_rows"));
         rows_menu.append_section(None, &sec_row_del);
         menu_model.append_submenu(Some(tr("ctx_row_menu")), &rows_menu);
 
@@ -350,9 +355,7 @@ impl DocumentView {
 
         // Atalho em destaque, fora dos submenus: Somar coluna.
         let sec_quick = gio::Menu::new();
-        let clear_item = gio::MenuItem::new(Some(tr("ctx_cells_clear")), Some("doc.cells-clear"));
-        clear_item.set_attribute_value("accel", Some(&"BackSpace".to_variant()));
-        sec_quick.append_item(&clear_item);
+        sec_quick.append_item(&menu_item("ctx_cells_clear", "doc.cells-clear", "clear_cells"));
         sec_quick.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
         menu_model.append_section(None, &sec_quick);
 
@@ -463,8 +466,8 @@ impl DocumentView {
 
         me.arm_filter_autocomplete(&filter_entry);
 
-        // Ctrl+S salva (sobrescreve o arquivo atual); Ctrl+Shift+S abre "Salvar como".
-        // Ctrl+Z desfaz; Ctrl+Shift+Z e Ctrl+Y refazem.
+        // Teclado do documento: Esc fecha menus; o resto são os atalhos
+        // configuráveis.
         let save_keys = gtk::EventControllerKey::new();
         save_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let me_keys = me.clone();
@@ -481,77 +484,18 @@ impl DocumentView {
             if me_keys.busy.get() {
                 return glib::Propagation::Stop;
             }
-            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-            let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
-            // Ctrl+A/C/X/V agem sobre linhas, exceto num campo de texto, onde
-            // continuam selecionando/copiando/colando o texto.
-            if ctrl && !shift && !me_keys.text_has_focus() {
-                match keyval {
-                    gdk::Key::a | gdk::Key::A => {
-                        me_keys.selection.select_all();
-                        me_keys.select_all_cells();
-                        return glib::Propagation::Stop;
-                    }
-                    gdk::Key::c | gdk::Key::C => {
-                        me_keys.copy_rows();
-                        return glib::Propagation::Stop;
-                    }
-                    gdk::Key::x | gdk::Key::X => {
-                        me_keys.cut_rows();
-                        return glib::Propagation::Stop;
-                    }
-                    gdk::Key::v | gdk::Key::V => {
-                        let cur = me_keys.cursor.borrow().as_ref().map(|r| r.rowid());
-                        me_keys.paste_rows(cur, false);
-                        return glib::Propagation::Stop;
-                    }
-                    _ => {}
+            // Atalhos configuráveis (ver `shortcuts`). Os que agem sobre a
+            // tabela, e os de tecla sem Ctrl/Alt, ficam com o campo de texto
+            // quando há um em foco (célula em edição, filtro, localizar),
+            // que tem seu próprio copiar, desfazer, apagar.
+            if let Some(action) = crate::shortcuts::find(keyval, state) {
+                let plain = !state.intersects(
+                    gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK,
+                );
+                if (action.grid || plain) && me_keys.text_has_focus() {
+                    return glib::Propagation::Proceed;
                 }
-            }
-            // Backspace limpa as células selecionadas; Delete exclui as
-            // linhas selecionadas (num campo de texto, os dois apagam texto).
-            if !ctrl && !me_keys.text_has_focus() {
-                match keyval {
-                    gdk::Key::BackSpace => {
-                        me_keys.clear_selected_cells();
-                        return glib::Propagation::Stop;
-                    }
-                    gdk::Key::Delete | gdk::Key::KP_Delete => {
-                        me_keys.delete_selected_rows();
-                        return glib::Propagation::Stop;
-                    }
-                    _ => {}
-                }
-            }
-            let undo = ctrl && !shift && matches!(keyval, gdk::Key::z | gdk::Key::Z);
-            let redo = ctrl
-                && (matches!(keyval, gdk::Key::y | gdk::Key::Y)
-                    || (shift && matches!(keyval, gdk::Key::z | gdk::Key::Z)));
-            // Num campo de texto (célula em edição, filtro, localizar) o atalho
-            // fica com o próprio campo, que tem seu desfazer de texto.
-            if (undo || redo) && !me_keys.text_has_focus() {
-                if undo {
-                    me_keys.do_undo();
-                } else {
-                    me_keys.do_redo();
-                }
-                return glib::Propagation::Stop;
-            }
-            // Ctrl+F vai para Localizar; Ctrl+H abre/fecha a barra de Substituir.
-            if ctrl && matches!(keyval, gdk::Key::f | gdk::Key::F) {
-                me_keys.find_entry.grab_focus();
-                return glib::Propagation::Stop;
-            }
-            if ctrl && matches!(keyval, gdk::Key::h | gdk::Key::H) {
-                me_keys.toggle_replace_bar();
-                return glib::Propagation::Stop;
-            }
-            if ctrl && matches!(keyval, gdk::Key::s | gdk::Key::S) {
-                if state.contains(gdk::ModifierType::SHIFT_MASK) {
-                    me_keys.save_as(|_ok| {});
-                } else {
-                    me_keys.do_save();
-                }
+                me_keys.run_shortcut(action.id);
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -2109,6 +2053,46 @@ impl DocumentView {
 
     /// `true` se o foco está num campo de texto (célula em edição, filtro,
     /// localizar), que tem seu próprio desfazer.
+    /// Executa a ação de um atalho de teclado (ids em `shortcuts::ACTIONS`).
+    fn run_shortcut(self: &Rc<Self>, id: &str) {
+        // ações de linha usam a linha do cursor, como o menu de contexto usa
+        // a linha clicada
+        let cursor = self.cursor.borrow().as_ref().map(|r| r.rowid());
+        if id.starts_with("row_") || id.starts_with("move_") {
+            let Some(rid) = cursor else { return };
+            self.ctx_rowid.set(rid);
+        }
+        match id {
+            "save" => self.do_save(),
+            "save_as" => self.save_as(|_ok| {}),
+            "undo" => self.do_undo(),
+            "redo" => self.do_redo(),
+            "find" => {
+                self.find_entry.grab_focus();
+            }
+            "replace" => self.toggle_replace_bar(),
+            "history" => self.show_history(),
+            "sql" => self.open_sql_dialog(),
+            "select_all" => {
+                self.selection.select_all();
+                self.select_all_cells();
+            }
+            "copy" => {
+                self.copy_rows();
+            }
+            "cut" => self.cut_rows(),
+            "paste" => self.paste_rows(cursor, false),
+            "clear_cells" => self.clear_selected_cells(),
+            "delete_rows" => self.delete_selected_rows(),
+            "row_below" => self.ctx_insert_row(false),
+            "row_above" => self.ctx_insert_row(true),
+            "row_clone" => self.ctx_clone_row(false),
+            "move_up" => self.ctx_move_row(true),
+            "move_down" => self.ctx_move_row(false),
+            _ => {}
+        }
+    }
+
     fn text_has_focus(&self) -> bool {
         self.window()
             .and_then(|w| GtkWindowExt::focus(&w))
