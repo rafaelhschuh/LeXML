@@ -7,6 +7,7 @@ mod document;
 mod textdoc;
 mod recent;
 mod sort;
+mod replace;
 mod row_object;
 
 fn main() -> gtk::glib::ExitCode {

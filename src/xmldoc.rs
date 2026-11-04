@@ -52,6 +52,9 @@ enum Op {
     AddColumn(ColSnap),
     DropColumn(ColSnap),
     RenameColumn { old: String, new: String },
+    /// Várias alterações de célula desfeitas e refeitas como um passo só
+    /// (Substituir todas).
+    Batch(Vec<Op>),
 }
 
 #[derive(Default)]
@@ -75,6 +78,8 @@ pub enum Change {
     ColumnAdded { index: usize, name: String, values: HashMap<i64, String> },
     ColumnRemoved { name: String },
     ColumnRenamed { from: String, to: String },
+    /// Várias células mudaram de valor: (rowid, coluna, valor).
+    Cells(Vec<(i64, String, String)>),
 }
 
 pub struct XmlDoc {
@@ -95,6 +100,9 @@ pub struct XmlDoc {
     /// Apelido do `rid_col` nos resultados de `filter()`, também livre de colisão.
     rid_alias: String,
     history: RefCell<History>,
+    /// Lote de alterações de célula em andamento (`batch_begin`..`batch_end`):
+    /// vira um único passo de desfazer quando o lote é confirmado.
+    pending: RefCell<Option<Vec<Op>>>,
 }
 
 /// Cria um Field padrão (string, largura 40) com o nome dado.
@@ -246,6 +254,7 @@ impl XmlDoc {
             ord_col,
             rid_alias,
             history: RefCell::default(),
+            pending: RefCell::new(None),
         })
     }
 
@@ -263,6 +272,7 @@ impl XmlDoc {
             ord_col: "__ord".into(),
             rid_alias: "_rid".into(),
             history: RefCell::default(),
+            pending: RefCell::new(None),
         })
     }
 
@@ -709,13 +719,82 @@ impl XmlDoc {
         Ok(())
     }
 
+    /// Altera várias células de uma vez — (rowid, coluna, valor novo) — como
+    /// um único passo de desfazer. Devolve quantas células mudaram de fato.
+    pub fn update_cells(&self, edits: &[(i64, String, String)]) -> Result<usize> {
+        self.batch_begin()?;
+        match self.batch_update(edits) {
+            Ok(_) => self.batch_end(true),
+            Err(e) => {
+                let _ = self.batch_end(false);
+                Err(e)
+            }
+        }
+    }
+
+    /// Abre um lote de alterações de célula. Permite gravar um lote grande
+    /// em partes (`batch_update`), com a interface viva entre elas, e ainda
+    /// assim desfazê-lo num passo só. Termine sempre com `batch_end`.
+    pub fn batch_begin(&self) -> Result<()> {
+        self.db.execute_batch("BEGIN")?;
+        *self.pending.borrow_mut() = Some(Vec::new());
+        Ok(())
+    }
+
+    /// Grava uma parte do lote aberto. Devolve quantas células mudaram.
+    pub fn batch_update(&self, edits: &[(i64, String, String)]) -> Result<usize> {
+        let mut n = 0;
+        for (rowid, column, value) in edits {
+            let old: Value = self
+                .db
+                .prepare_cached(&format!(
+                    "SELECT {} FROM dados WHERE {} = ?1",
+                    quote_ident(column),
+                    self.q_rid()
+                ))?
+                .query_row([rowid], |r| r.get(0))?;
+            let old = value_to_string(&old);
+            if old == *value {
+                continue;
+            }
+            self.update_cell_raw(*rowid, column, value)?;
+            if let Some(ops) = self.pending.borrow_mut().as_mut() {
+                ops.push(Op::Cell { rowid: *rowid, col: column.clone(), old, new: value.clone() });
+            }
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Fecha o lote: confirma (e registra como um passo de desfazer) ou
+    /// descarta tudo. Devolve quantas células mudaram.
+    pub fn batch_end(&self, commit: bool) -> Result<usize> {
+        let mut ops = self.pending.borrow_mut().take().unwrap_or_default();
+        if !commit {
+            self.db.execute_batch("ROLLBACK")?;
+            return Ok(0);
+        }
+        if let Err(e) = self.db.execute_batch("COMMIT") {
+            let _ = self.db.execute_batch("ROLLBACK");
+            return Err(e.into());
+        }
+        let n = ops.len();
+        match n {
+            0 => {}
+            1 => self.record(ops.pop().unwrap()),
+            _ => self.record(Op::Batch(ops)),
+        }
+        Ok(n)
+    }
+
     fn update_cell_raw(&self, rowid: i64, column: &str, value: &str) -> Result<()> {
         let sql = format!(
             "UPDATE dados SET {} = ?1 WHERE {} = ?2",
             quote_ident(column),
             self.q_rid()
         );
-        self.db.execute(&sql, rusqlite::params![value, rowid])?;
+        // Em cache: substituir em lote repete o mesmo comando milhares de vezes.
+        self.db.prepare_cached(&sql)?.execute(rusqlite::params![value, rowid])?;
         Ok(())
     }
 
@@ -813,6 +892,21 @@ impl XmlDoc {
                     self.drop_column_raw(&name)?;
                     Change::ColumnRemoved { name }
                 }
+            }
+            Op::Batch(ops) => {
+                let mut cells = Vec::with_capacity(ops.len());
+                let mut apply_one = |op: &Op| -> Result<()> {
+                    if let Change::Cell { rowid, column, value } = self.apply(op, forward)? {
+                        cells.push((rowid, column, value));
+                    }
+                    Ok(())
+                };
+                if forward {
+                    ops.iter().try_for_each(&mut apply_one)?;
+                } else {
+                    ops.iter().rev().try_for_each(&mut apply_one)?;
+                }
+                Change::Cells(cells)
             }
             Op::RenameColumn { old, new } => {
                 let (from, to) = if forward { (old, new) } else { (new, old) };
@@ -1422,6 +1516,30 @@ mod tests {
         assert_eq!(dp.next_row_where(r3, |_| true).unwrap(), None);
         assert_eq!(dp.visible_row(r2, "").unwrap().unwrap(), ["2", "Beta", "4.25"]);
         assert!(dp.visible_row(r2, "nome = 'Alpha'").unwrap().is_none());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn varias_celulas_desfazem_num_passo_so() {
+        let p = sample_xml();
+        let dp = XmlDoc::open(&p).unwrap();
+        let original = saved(&dp);
+        let (r1, r2) = (rid_of(&dp, "1"), rid_of(&dp, "2"));
+        let edits = vec![
+            (r1, "nome".to_string(), "X".to_string()),
+            (r2, "nome".to_string(), "Y".to_string()),
+            (r2, "valor".to_string(), "4.25".to_string()), // igual: não conta
+        ];
+        assert_eq!(dp.update_cells(&edits).unwrap(), 2);
+        let alterado = saved(&dp);
+        match dp.undo().unwrap() {
+            Some(Change::Cells(c)) => assert_eq!(c.len(), 2),
+            _ => panic!("esperava Change::Cells"),
+        }
+        assert_eq!(saved(&dp), original);
+        assert!(!dp.can_undo(), "as duas células voltaram num passo só");
+        dp.redo().unwrap();
+        assert_eq!(saved(&dp), alterado);
         let _ = std::fs::remove_file(&p);
     }
 

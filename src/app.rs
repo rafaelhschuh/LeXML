@@ -944,6 +944,16 @@ pub fn run() -> glib::ExitCode {
             /* Remove o contorno de foco quadrado desenhado ao navegar
                por teclado; o fundo arredondado do :selected já indica
                a linha ativa. */
+            /* Camada de andamento sobre a tabela (operações longas). */
+            .busy-shade {
+                background-color: alpha(@window_bg_color, 0.6);
+            }
+            .busy-card {
+                background-color: @window_bg_color;
+                border-radius: 12px;
+                padding: 20px 28px;
+                box-shadow: 0 2px 12px alpha(black, 0.25);
+            }
             listbox.recent-list {
                 border-radius: 8px;
             }

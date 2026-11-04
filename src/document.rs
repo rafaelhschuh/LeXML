@@ -1,6 +1,7 @@
 use crate::xmldoc::{Change, XmlDoc, QueryResult};
 use crate::row_object::RowObject;
 use crate::dialog;
+use crate::replace::Matcher;
 use crate::sort::{cmp_keys, sort_key, SortKey};
 use crate::i18n::tr;
 use gtk::prelude::*;
@@ -43,6 +44,22 @@ pub struct DocumentView {
     colview: gtk::ColumnView,
     status: gtk::Label,
     find_entry: gtk::SearchEntry,
+    toolbar: gtk::Box,
+    replace_revealer: gtk::Revealer,
+    // Camada de "trabalhando…" sobre a tabela durante operações longas.
+    busy: Cell<bool>,
+    busy_shade: gtk::Box,
+    busy_spinner: gtk::Spinner,
+    busy_label: gtk::Label,
+    busy_bar: gtk::ProgressBar,
+    // Barra de Substituir (Ctrl+H), abaixo da barra de ferramentas.
+    replace_toggle: gtk::ToggleButton,
+    replace_entry: gtk::Entry,
+    // Escopo: "Todas as colunas" (posição 0) seguido das colunas visíveis.
+    scope_list: gtk::StringList,
+    scope_dd: gtk::DropDown,
+    case_chk: gtk::CheckButton,
+    whole_chk: gtk::CheckButton,
     undo_btn: gtk::Button,
     redo_btn: gtk::Button,
     menu: gtk::PopoverMenu,
@@ -104,6 +121,12 @@ impl DocumentView {
             .build();
         bar.append(&find_entry);
 
+        let replace_toggle = gtk::ToggleButton::builder()
+            .icon_name("edit-find-replace-symbolic")
+            .tooltip_text(tr("replace_tooltip"))
+            .build();
+        bar.append(&replace_toggle);
+
         let filter_entry = gtk::Entry::builder()
             .placeholder_text(tr("filter_placeholder"))
             .hexpand(true)
@@ -133,6 +156,44 @@ impl DocumentView {
 
         root.append(&bar);
 
+        // ---------- barra de substituir ----------
+        let rbar = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .build();
+        let replace_entry = gtk::Entry::builder()
+            .placeholder_text(tr("replace_placeholder"))
+            .width_chars(18)
+            .build();
+        rbar.append(&replace_entry);
+        let scope_list = gtk::StringList::new(&[tr("all_columns")]);
+        let scope_dd = gtk::DropDown::builder().model(&scope_list).build();
+        scope_dd.set_tooltip_text(Some(tr("replace_scope_tooltip")));
+        rbar.append(&scope_dd);
+        let case_chk = gtk::CheckButton::with_label(tr("match_case"));
+        rbar.append(&case_chk);
+        let whole_chk = gtk::CheckButton::with_label(tr("whole_cell"));
+        whole_chk.set_tooltip_text(Some(tr("whole_cell_tooltip")));
+        rbar.append(&whole_chk);
+        let spacer = gtk::Box::builder().hexpand(true).build();
+        rbar.append(&spacer);
+        let replace_btn = gtk::Button::with_label(tr("replace"));
+        rbar.append(&replace_btn);
+        let replace_all_btn = gtk::Button::with_label(tr("replace_all"));
+        rbar.append(&replace_all_btn);
+        let replace_close = gtk::Button::from_icon_name("window-close-symbolic");
+        replace_close.add_css_class("flat");
+        rbar.append(&replace_close);
+        let replace_revealer = gtk::Revealer::builder().child(&rbar).build();
+        replace_toggle
+            .bind_property("active", &replace_revealer, "reveal-child")
+            .sync_create()
+            .build();
+        root.append(&replace_revealer);
+
         // ---------- tabela ----------
         let store = gio::ListStore::new::<RowObject>();
         let selection = gtk::SingleSelection::new(Some(store.clone()));
@@ -151,7 +212,35 @@ impl DocumentView {
             .overlay_scrolling(false)
             .build();
         scroller.set_child(Some(&colview));
-        root.append(&scroller);
+
+        // Camada sobre a tabela para operações longas: escurece a grade,
+        // bloqueia cliques e mostra o andamento em vez de congelar a janela.
+        let busy_shade = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .visible(false)
+            .build();
+        busy_shade.add_css_class("busy-shade");
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .vexpand(true)
+            .build();
+        card.add_css_class("busy-card");
+        let busy_spinner = gtk::Spinner::new();
+        busy_spinner.set_size_request(32, 32);
+        card.append(&busy_spinner);
+        let busy_label = gtk::Label::new(None);
+        busy_label.add_css_class("heading");
+        card.append(&busy_label);
+        let busy_bar = gtk::ProgressBar::builder().show_text(true).width_request(280).build();
+        card.append(&busy_bar);
+        busy_shade.append(&card);
+
+        let overlay = gtk::Overlay::builder().vexpand(true).child(&scroller).build();
+        overlay.add_overlay(&busy_shade);
+        root.append(&overlay);
 
         // ---------- rodapé ----------
         let status = gtk::Label::builder()
@@ -229,6 +318,19 @@ impl DocumentView {
             colview,
             status,
             find_entry: find_entry.clone(),
+            toolbar: bar.clone(),
+            replace_revealer: replace_revealer.clone(),
+            busy: Cell::new(false),
+            busy_shade,
+            busy_spinner,
+            busy_label,
+            busy_bar,
+            replace_toggle: replace_toggle.clone(),
+            replace_entry: replace_entry.clone(),
+            scope_list,
+            scope_dd,
+            case_chk,
+            whole_chk,
             undo_btn: undo_btn.clone(),
             redo_btn: redo_btn.clone(),
             menu,
@@ -274,6 +376,11 @@ impl DocumentView {
         save_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let me_keys = me.clone();
         save_keys.connect_key_pressed(move |_, keyval, _code, state| {
+            // Durante uma operação longa o teclado fica bloqueado: salvar ou
+            // desfazer no meio dela deixaria o documento pela metade.
+            if me_keys.busy.get() {
+                return glib::Propagation::Stop;
+            }
             let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
             let undo = ctrl && !shift && matches!(keyval, gdk::Key::z | gdk::Key::Z);
@@ -290,6 +397,15 @@ impl DocumentView {
                 }
                 return glib::Propagation::Stop;
             }
+            // Ctrl+F vai para Localizar; Ctrl+H abre/fecha a barra de Substituir.
+            if ctrl && matches!(keyval, gdk::Key::f | gdk::Key::F) {
+                me_keys.find_entry.grab_focus();
+                return glib::Propagation::Stop;
+            }
+            if ctrl && matches!(keyval, gdk::Key::h | gdk::Key::H) {
+                me_keys.toggle_replace_bar();
+                return glib::Propagation::Stop;
+            }
             if ctrl && matches!(keyval, gdk::Key::s | gdk::Key::S) {
                 if state.contains(gdk::ModifierType::SHIFT_MASK) {
                     me_keys.save_as(|_ok| {});
@@ -303,6 +419,26 @@ impl DocumentView {
         me.root.add_controller(save_keys);
 
         undo_btn.connect_clicked(clone!(@strong me => move |_| me.do_undo()));
+        replace_toggle.connect_toggled(clone!(@strong me => move |t| {
+            if t.is_active() {
+                me.focus_replace_bar();
+            }
+        }));
+        replace_close.connect_clicked(clone!(@strong me => move |_| me.replace_toggle.set_active(false)));
+        replace_btn.connect_clicked(clone!(@strong me => move |_| me.replace_one()));
+        replace_all_btn.connect_clicked(clone!(@strong me => move |_| me.replace_all()));
+        replace_entry.connect_activate(clone!(@strong me => move |_| me.replace_one()));
+        // Esc na barra de Substituir fecha a barra.
+        let esc = gtk::EventControllerKey::new();
+        esc.connect_key_pressed(clone!(@strong me => @default-return glib::Propagation::Proceed, move |_, keyval, _, _| {
+            if keyval == gdk::Key::Escape {
+                me.replace_toggle.set_active(false);
+                me.find_entry.grab_focus();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        }));
+        replace_revealer.add_controller(esc);
         redo_btn.connect_clicked(clone!(@strong me => move |_| me.do_redo()));
         sql_btn.connect_clicked(clone!(@strong me => move |_| me.open_sql_dialog()));
         sum_btn.connect_clicked(clone!(@strong me => move |_| me.do_sum()));
@@ -314,6 +450,9 @@ impl DocumentView {
         // varredura O(linhas×colunas) não roda a cada tecla numa tabela grande.
         find_entry.connect_search_changed(clone!(@strong me => move |e| {
             let text = e.text().to_string();
+            if text.is_empty() {
+                return; // apagar o texto não procura células vazias
+            }
             let g = me.search_gen.get().wrapping_add(1);
             me.search_gen.set(g);
             let me2 = me.clone();
@@ -892,6 +1031,7 @@ impl DocumentView {
         }
 
         self.update_sort_indicators();
+        self.refresh_scope();
         // clique no cabeçalho ordena; duplo clique renomeia
         self.arm_headers();
     }
@@ -1062,29 +1202,278 @@ impl DocumentView {
         entry.grab_focus();
     }
 
+    /// Critério atual de Localizar, com as opções da barra de Substituir.
+    fn matcher(&self, needle: &str) -> Matcher {
+        Matcher::new(needle, self.case_chk.is_active(), self.whole_chk.is_active())
+    }
+
+    /// Colunas onde procurar: todas, ou só a escolhida na barra de Substituir.
+    fn scope_cols(&self) -> Vec<usize> {
+        let ncol = self.state.columns.borrow().len();
+        match self.scope_dd.selected() {
+            0 | gtk::INVALID_LIST_POSITION => (0..ncol).collect(),
+            i => {
+                let name = self.scope_list.string(i).map(|s| s.to_string());
+                let cols = self.state.columns.borrow();
+                cols.iter().position(|c| Some(c) == name.as_ref()).into_iter().collect()
+            }
+        }
+    }
+
+    /// Mantém a lista de escopo igual às colunas visíveis, preservando a
+    /// coluna escolhida se ela ainda existir.
+    fn refresh_scope(&self) {
+        let chosen = match self.scope_dd.selected() {
+            0 | gtk::INVALID_LIST_POSITION => None,
+            i => self.scope_list.string(i).map(|s| s.to_string()),
+        };
+        let cols = self.state.columns.borrow().clone();
+        let names: Vec<&str> = cols.iter().map(|c| c.as_str()).collect();
+        self.scope_list.splice(1, self.scope_list.n_items().saturating_sub(1), &names);
+        let sel = chosen
+            .and_then(|c| cols.iter().position(|n| *n == c))
+            .map_or(0, |p| p as u32 + 1);
+        self.scope_dd.set_selected(sel);
+    }
+
+    fn toggle_replace_bar(&self) {
+        self.replace_toggle.set_active(!self.replace_toggle.is_active());
+    }
+
+    /// Ao abrir a barra: foca Localizar se está vazio, senão Substituir por.
+    fn focus_replace_bar(&self) {
+        if self.find_entry.text().is_empty() {
+            self.find_entry.grab_focus();
+        } else {
+            self.replace_entry.grab_focus();
+        }
+    }
+
     fn find_next(&self, needle: &str) {
-        let needle = needle.to_lowercase();
-        if needle.is_empty() {
+        let m = self.matcher(needle);
+        if m.is_empty() {
             return;
         }
         let n = self.store.n_items();
         if n == 0 {
             return;
         }
+        let cols = self.scope_cols();
         let start = self.selection.selected();
         let start = if start == gtk::INVALID_LIST_POSITION { 0 } else { start + 1 };
         for off in 0..n {
             let pos = (start + off) % n;
             if let Some(obj) = self.store.item(pos) {
                 let row = obj.downcast::<RowObject>().unwrap();
-                let ncol = self.state.columns.borrow().len();
-                let hit = (0..ncol).any(|c| row.value(c).to_lowercase().contains(&needle));
-                if hit {
+                if cols.iter().any(|&c| m.matches(&row.value(c))) {
                     self.selection.set_selected(pos);
                     self.colview
                         .scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
                     return;
                 }
+            }
+        }
+        self.status.set_text(tr("find_no_match"));
+    }
+
+    /// Substituições de uma linha: (coluna, valor novo) de cada célula do
+    /// escopo que casa com `m`.
+    fn row_replacements(&self, row: &RowObject, m: &Matcher, with: &str, cols: &[usize]) -> Vec<(usize, String)> {
+        cols.iter()
+            .filter_map(|&c| m.replace(&row.value(c), with).map(|v| (c, v)))
+            .collect()
+    }
+
+    /// Substituir só vale na visão editável e com a tabela carregada.
+    fn can_replace(&self) -> bool {
+        if self.busy.get() {
+            return false;
+        }
+        if !*self.state.editable.borrow() {
+            self.status.set_text(tr("replace_readonly"));
+            return false;
+        }
+        !self.state.loading.get()
+    }
+
+    /// Substitui na linha selecionada (se ela casa) e segue para a próxima.
+    fn replace_one(self: &Rc<Self>) {
+        if !self.can_replace() {
+            return;
+        }
+        self.commit_pending_edit();
+        let needle = self.find_entry.text().to_string();
+        let m = self.matcher(&needle);
+        if m.is_empty() {
+            self.find_entry.grab_focus();
+            return;
+        }
+        let with = self.replace_entry.text().to_string();
+        let cols = self.scope_cols();
+        let pos = self.selection.selected();
+        if let Some(row) = self.store.item(pos).and_downcast::<RowObject>() {
+            let reps = self.row_replacements(&row, &m, &with, &cols);
+            if !reps.is_empty() {
+                self.apply_replacements(vec![(pos, row, reps)]);
+            }
+        }
+        self.find_next(&needle);
+    }
+
+    /// Substitui em todas as linhas visíveis (respeita o filtro), num único
+    /// passo de desfazer. Roda em blocos, com a camada de andamento visível,
+    /// para a janela não congelar numa tabela grande.
+    fn replace_all(self: &Rc<Self>) {
+        if !self.can_replace() {
+            return;
+        }
+        self.commit_pending_edit();
+        let m = self.matcher(&self.find_entry.text());
+        if m.is_empty() {
+            self.find_entry.grab_focus();
+            return;
+        }
+        let with = self.replace_entry.text().to_string();
+        let cols = self.scope_cols();
+        let names = self.state.columns.borrow().clone();
+        let total = self.store.n_items();
+        if let Err(e) = self.state.dp.batch_begin() {
+            self.error(&format!("{}\n{e}", tr("cell_write_error")));
+            return;
+        }
+        self.begin_busy(tr("replacing"));
+
+        const CHUNK: u32 = 4000;
+        let weak = Rc::downgrade(self);
+        let mut next = 0u32;
+        // Linhas alteradas: os RowObjects só mudam depois de o lote ser
+        // confirmado, para uma falha no meio não deixar a grade divergente.
+        let mut changed: Vec<(u32, RowObject, Vec<(usize, String)>)> = Vec::new();
+        glib::idle_add_local(move || {
+            let Some(me) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let end = (next + CHUNK).min(total);
+            let mut edits = Vec::new();
+            for pos in next..end {
+                if let Some(row) = me.store.item(pos).and_downcast::<RowObject>() {
+                    let reps = me.row_replacements(&row, &m, &with, &cols);
+                    if !reps.is_empty() {
+                        edits.extend(
+                            reps.iter().map(|(c, v)| (row.rowid(), names[*c].clone(), v.clone())),
+                        );
+                        changed.push((pos, row, reps));
+                    }
+                }
+            }
+            if let Err(e) = me.state.dp.batch_update(&edits) {
+                let _ = me.state.dp.batch_end(false);
+                me.end_busy();
+                me.error(&format!("{}\n{e}", tr("cell_write_error")));
+                return glib::ControlFlow::Break;
+            }
+            next = end;
+            me.set_busy_progress(next, total);
+            if next < total {
+                return glib::ControlFlow::Continue;
+            }
+            match me.state.dp.batch_end(true) {
+                Ok(n) => {
+                    me.show_replacements(std::mem::take(&mut changed));
+                    if n > 0 {
+                        me.mark_dirty();
+                    }
+                    me.end_busy();
+                    me.status.set_text(&format!("{n} {}", tr("cells_replaced")));
+                }
+                Err(e) => {
+                    me.end_busy();
+                    me.error(&format!("{}\n{e}", tr("cell_write_error")));
+                }
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// Reflete na grade substituições já gravadas. Muitas linhas viram um
+    /// único aviso de mudança, em vez de um por linha.
+    fn show_replacements(&self, changed: Vec<(u32, RowObject, Vec<(usize, String)>)>) {
+        // Conta linhas distintas: o desfazer traz uma entrada por célula.
+        let rows: std::collections::HashSet<u32> = changed.iter().map(|(p, _, _)| *p).collect();
+        let many = rows.len() > 500;
+        for (pos, row, reps) in changed {
+            for (c, v) in reps {
+                row.set_value(c, v);
+            }
+            if !many {
+                self.store.items_changed(pos, 1, 1);
+            }
+        }
+        if many {
+            let sel = self.selection.selected();
+            let n = self.store.n_items();
+            self.store.items_changed(0, n, n);
+            if sel != gtk::INVALID_LIST_POSITION {
+                self.selection.set_selected(sel);
+            }
+        }
+    }
+
+    fn begin_busy(&self, text: &str) {
+        self.busy.set(true);
+        self.busy_label.set_text(text);
+        self.busy_bar.set_fraction(0.0);
+        self.busy_bar.set_text(None);
+        self.busy_spinner.start();
+        self.busy_shade.set_visible(true);
+        self.toolbar.set_sensitive(false);
+        self.replace_revealer.set_sensitive(false);
+    }
+
+    fn set_busy_progress(&self, done: u32, total: u32) {
+        let frac = if total == 0 { 1.0 } else { done as f64 / total as f64 };
+        self.busy_bar.set_fraction(frac);
+        self.busy_bar
+            .set_text(Some(&format!("{done} {} {total} {}", tr("of"), tr("rows"))));
+    }
+
+    fn end_busy(&self) {
+        self.busy.set(false);
+        self.busy_spinner.stop();
+        self.busy_shade.set_visible(false);
+        self.toolbar.set_sensitive(true);
+        self.replace_revealer.set_sensitive(true);
+    }
+
+    /// Grava as substituições no banco (um passo de desfazer) e atualiza só as
+    /// linhas afetadas na grade. Devolve quantas células mudaram.
+    fn apply_replacements(&self, changed: Vec<(u32, RowObject, Vec<(usize, String)>)>) -> usize {
+        if changed.is_empty() {
+            return 0;
+        }
+        let names = self.state.columns.borrow().clone();
+        let edits: Vec<(i64, String, String)> = changed
+            .iter()
+            .flat_map(|(_, row, reps)| {
+                reps.iter().map(|(c, v)| (row.rowid(), names[*c].clone(), v.clone()))
+            })
+            .collect();
+        match self.state.dp.update_cells(&edits) {
+            Ok(n) => {
+                for (pos, row, reps) in changed {
+                    for (c, v) in reps {
+                        row.set_value(c, v);
+                    }
+                    self.store.items_changed(pos, 1, 1);
+                }
+                if n > 0 {
+                    self.mark_dirty();
+                }
+                n
+            }
+            Err(e) => {
+                self.error(&format!("{}\n{e}", tr("cell_write_error")));
+                0
             }
         }
     }
@@ -1183,6 +1572,10 @@ impl DocumentView {
     /// (sem abrir o seletor); caso contrário, abre "Salvar como". `after` é
     /// chamado quando termina, com `true` se gravou.
     pub fn save_then(self: &Rc<Self>, after: impl FnOnce(bool) + 'static) {
+        if self.busy.get() {
+            after(false);
+            return;
+        }
         self.commit_pending_edit();
         let known = self.state.saved_path.borrow().clone();
         if let Some(path) = known {
@@ -1316,7 +1709,7 @@ impl DocumentView {
     }
 
     fn history_step(self: &Rc<Self>, forward: bool) {
-        if !*self.state.editable.borrow() || self.state.loading.get() {
+        if !*self.state.editable.borrow() || self.state.loading.get() || self.busy.get() {
             return;
         }
         self.commit_pending_edit();
@@ -1346,6 +1739,27 @@ impl DocumentView {
                     self.store.items_changed(pos, 1, 1);
                 }
                 self.select_rowid(rowid);
+            }
+            Change::Cells(cells) => {
+                let mut pos_of = std::collections::HashMap::new();
+                for i in 0..self.store.n_items() {
+                    if let Some(obj) = self.store.item(i) {
+                        pos_of.insert(obj.downcast::<RowObject>().unwrap().rowid(), i);
+                    }
+                }
+                let cols = self.state.columns.borrow().clone();
+                let mut changed: Vec<(u32, RowObject, Vec<(usize, String)>)> = Vec::new();
+                for (rowid, column, value) in cells {
+                    let (Some(&pos), Some(c)) =
+                        (pos_of.get(&rowid), cols.iter().position(|n| *n == column))
+                    else {
+                        continue; // fora da visão atual
+                    };
+                    if let Some(row) = self.store.item(pos).and_downcast::<RowObject>() {
+                        changed.push((pos, row, vec![(c, value)]));
+                    }
+                }
+                self.show_replacements(changed);
             }
             Change::RowAdded { rowid } => {
                 self.show_row_added(rowid);

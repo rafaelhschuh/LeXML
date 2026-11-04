@@ -10,6 +10,7 @@ Este guia descreve o comportamento da versão 0.5.4 do Lê-XML.
 - [Desfazer e refazer](#desfazer-e-refazer)
 - [Ordenar por uma coluna](#ordenar-por-uma-coluna)
 - [Localizar valores](#localizar-valores)
+- [Substituir valores](#substituir-valores)
 - [Filtrar com SQL WHERE](#filtrar-com-sql-where)
 - [Executar uma consulta SQL](#executar-uma-consulta-sql)
 - [Somar uma coluna](#somar-uma-coluna)
@@ -227,6 +228,34 @@ A busca:
 - começa depois da linha selecionada e volta ao início ao chegar ao fim;
 - apenas seleciona a ocorrência; não esconde outras linhas.
 
+## Substituir valores
+
+Clique no botão de localizar e substituir, ao lado do campo **Localizar…**, ou
+pressione `Ctrl+H`. Uma segunda barra aparece abaixo da barra de ferramentas.
+
+1. digite o texto procurado em **Localizar…**;
+2. digite o novo texto em **Substituir por…**;
+3. use **Substituir** para trocar na linha selecionada e ir para a próxima
+   ocorrência, ou **Substituir todas** para trocar em todas as linhas visíveis.
+
+Opções da barra:
+
+- **Todas as colunas** — escolha uma coluna para limitar a busca e a troca a
+  ela;
+- **Maiúsc./minúsc.** — diferencia maiúsculas de minúsculas;
+- **Célula inteira** — a célula precisa ser igual ao texto procurado, e não
+  apenas contê-lo. Com **Localizar…** vazio, encontra as células vazias, o que
+  serve para preencher valores em branco.
+
+As opções também valem para o **Localizar…** enquanto estiverem marcadas.
+
+**Substituir todas** respeita o filtro `WHERE` ativo: só troca nas linhas
+visíveis. O rodapé informa quantas células mudaram, e um único `Ctrl+Z` desfaz
+a substituição inteira. Substituir não está disponível no resultado de uma
+consulta SQL livre.
+
+`Esc` fecha a barra; `Ctrl+F` leva o cursor para **Localizar…**.
+
 ## Filtrar com SQL WHERE
 
 O campo **Filtrar (SQL WHERE)** aceita somente a expressão que viria depois de
@@ -390,7 +419,10 @@ A aba **Sobre** informa versão, autor e endereço do repositório.
 | Salvar como | `Ctrl+Shift+S` |
 | Desfazer | `Ctrl+Z` |
 | Refazer | `Ctrl+Shift+Z` ou `Ctrl+Y` |
+| Ir para Localizar | `Ctrl+F` |
 | Próxima ocorrência em Localizar | `Enter` |
+| Abrir/fechar Substituir | `Ctrl+H` |
+| Substituir e ir para a próxima | `Enter` em **Substituir por…** |
 | Aplicar filtro | `Enter` no campo de filtro |
 | Aceitar sugestão do filtro | `Tab` ou `Enter` |
 | Navegar nas sugestões | `↑` e `↓` |
