@@ -1,20 +1,20 @@
 mod app;
+mod backup;
 mod config;
 mod dialog;
-mod i18n;
-mod xmldoc;
-mod document;
-mod textdoc;
-mod recent;
-mod sort;
-mod replace;
-mod rowclip;
-mod backup;
 mod diff;
+mod document;
 mod history;
-mod shortcuts;
+mod i18n;
+mod recent;
 mod recovery;
+mod replace;
 mod row_object;
+mod rowclip;
+mod shortcuts;
+mod sort;
+mod textdoc;
+mod xmldoc;
 
 fn main() -> gtk::glib::ExitCode {
     app::run()

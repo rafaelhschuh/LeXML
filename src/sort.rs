@@ -70,7 +70,10 @@ mod tests {
 
     #[test]
     fn numeros_comparam_pelo_valor_inclusive_no_formato_brasileiro() {
-        assert_eq!(ordena(&["10", "9", "1.234,56", "100.5"], true), ["9", "10", "100.5", "1.234,56"]);
+        assert_eq!(
+            ordena(&["10", "9", "1.234,56", "100.5"], true),
+            ["9", "10", "100.5", "1.234,56"]
+        );
     }
 
     #[test]

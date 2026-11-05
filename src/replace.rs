@@ -9,7 +9,11 @@ pub struct Matcher {
 
 impl Matcher {
     pub fn new(needle: &str, case_sensitive: bool, whole_cell: bool) -> Self {
-        Self { needle: needle.chars().collect(), case_sensitive, whole_cell }
+        Self {
+            needle: needle.chars().collect(),
+            case_sensitive,
+            whole_cell,
+        }
     }
 
     /// `true` se não há o que procurar (texto vazio fora do modo célula inteira).
@@ -24,7 +28,11 @@ impl Matcher {
     /// Se `hay` começa, na posição `at`, com o texto procurado.
     fn match_at(&self, hay: &[char], at: usize) -> bool {
         hay.len() - at >= self.needle.len()
-            && self.needle.iter().zip(&hay[at..]).all(|(&n, &h)| self.eq(n, h))
+            && self
+                .needle
+                .iter()
+                .zip(&hay[at..])
+                .all(|(&n, &h)| self.eq(n, h))
     }
 
     pub fn matches(&self, cell: &str) -> bool {
@@ -69,7 +77,10 @@ mod tests {
     #[test]
     fn substitui_todas_as_ocorrencias_sem_diferenciar_maiusculas() {
         let m = Matcher::new("ana", false, false);
-        assert_eq!(m.replace("Ana e ANA e banana", "X").unwrap(), "X e X e bXna");
+        assert_eq!(
+            m.replace("Ana e ANA e banana", "X").unwrap(),
+            "X e X e bXna"
+        );
         assert!(m.replace("Bruno", "X").is_none());
     }
 

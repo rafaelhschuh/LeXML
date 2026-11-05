@@ -32,7 +32,9 @@ fn versions_dir() -> PathBuf {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Carimbo de data/hora local para nomes de arquivo: `20241103-142530`.
@@ -61,12 +63,21 @@ impl Recovery {
             now_secs()
         );
         let dir = recovery_dir();
-        Self { data: dir.join(format!("{id}.xml")), meta: dir.join(format!("{id}.info")) }
+        Self {
+            data: dir.join(format!("{id}.xml")),
+            meta: dir.join(format!("{id}.info")),
+        }
     }
 
     /// Grava a cópia (`bytes`) e o registro com o arquivo de origem. Bloqueia:
     /// chame fora da thread da interface.
-    pub fn write(data: &Path, meta: &Path, bytes: &[u8], original: Option<&Path>, name: &str) -> anyhow::Result<()> {
+    pub fn write(
+        data: &Path,
+        meta: &Path,
+        bytes: &[u8],
+        original: Option<&Path>,
+        name: &str,
+    ) -> anyhow::Result<()> {
         if let Some(dir) = data.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -76,7 +87,9 @@ impl Recovery {
             std::process::id(),
             now_secs(),
             name.replace('\n', " "),
-            original.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+            original
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
         );
         crate::xmldoc::write_atomic(meta, info.as_bytes())
     }
@@ -145,15 +158,23 @@ pub fn orphans() -> Vec<Orphan> {
             continue;
         }
         let data = meta.with_extension("xml");
-        let Some((pid, saved, name, original)) =
-            fs::read_to_string(&meta).ok().as_deref().and_then(parse_meta)
+        let Some((pid, saved, name, original)) = fs::read_to_string(&meta)
+            .ok()
+            .as_deref()
+            .and_then(parse_meta)
         else {
             continue;
         };
         if alive(pid) || !data.is_file() {
             continue;
         }
-        out.push(Orphan { data, meta, original, name, saved });
+        out.push(Orphan {
+            data,
+            meta,
+            original,
+            name,
+            saved,
+        });
     }
     out.sort_by(|a, b| b.saved.cmp(&a.saved));
     out
@@ -207,8 +228,12 @@ fn canon(p: &Path) -> PathBuf {
 /// Nome livre em `versoes/` para uma cópia de `original`.
 fn version_path(original: &Path) -> PathBuf {
     let dir = versions_dir();
-    let stem = original.file_stem().map_or("arquivo".into(), |s| s.to_string_lossy().into_owned());
-    let ext = original.extension().map_or("xml".into(), |s| s.to_string_lossy().into_owned());
+    let stem = original
+        .file_stem()
+        .map_or("arquivo".into(), |s| s.to_string_lossy().into_owned());
+    let ext = original
+        .extension()
+        .map_or("xml".into(), |s| s.to_string_lossy().into_owned());
     let base = format!("{stem}_{}", stamp());
     let mut path = dir.join(format!("{base}.{ext}"));
     let mut n = 2;
@@ -220,7 +245,9 @@ fn version_path(original: &Path) -> PathBuf {
 }
 
 fn version_info(original: &Path, when: u64, kind: Kind) -> String {
-    let name = original.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let name = original
+        .file_name()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     format!(
         "original={}\nname={}\nsaved={when}\nkind={}\n",
         canon(original).to_string_lossy(),
@@ -242,7 +269,10 @@ pub fn save_version(path: &Path) {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or_else(now_secs, |d| d.as_secs());
     // esse conteúdo já está no histórico (salvou de novo sem mudar o arquivo)
-    if versions_of(path).iter().any(|v| v.kind == Kind::Saved && v.when == when) {
+    if versions_of(path)
+        .iter()
+        .any(|v| v.kind == Kind::Saved && v.when == when)
+    {
         return;
     }
     if fs::create_dir_all(versions_dir()).is_err() {
@@ -250,7 +280,10 @@ pub fn save_version(path: &Path) {
     }
     let data = version_path(path);
     if fs::copy(path, &data).is_ok() {
-        let _ = fs::write(data.with_extension("info"), version_info(path, when, Kind::Saved));
+        let _ = fs::write(
+            data.with_extension("info"),
+            version_info(path, when, Kind::Saved),
+        );
     }
 }
 
@@ -260,7 +293,10 @@ pub fn save_snapshot(original: &Path, bytes: &[u8], kind: Kind) -> anyhow::Resul
     fs::create_dir_all(versions_dir())?;
     let data = version_path(original);
     crate::xmldoc::write_atomic(&data, bytes)?;
-    crate::xmldoc::write_atomic(&data.with_extension("info"), version_info(original, now_secs(), kind).as_bytes())
+    crate::xmldoc::write_atomic(
+        &data.with_extension("info"),
+        version_info(original, now_secs(), kind).as_bytes(),
+    )
 }
 
 fn parse_version_info(text: &str) -> Option<(PathBuf, String, u64, Kind)> {
@@ -289,18 +325,31 @@ pub fn versions_of(path: &Path) -> Vec<Version> {
         if info.extension().is_none_or(|x| x != "info") {
             continue;
         }
-        let Some((original, name, when, kind)) =
-            fs::read_to_string(&info).ok().as_deref().and_then(parse_version_info)
+        let Some((original, name, when, kind)) = fs::read_to_string(&info)
+            .ok()
+            .as_deref()
+            .and_then(parse_version_info)
         else {
             continue;
         };
         if original != target {
             continue;
         }
-        let ext = path.extension().map_or("xml".into(), |s| s.to_string_lossy().into_owned());
+        let ext = path
+            .extension()
+            .map_or("xml".into(), |s| s.to_string_lossy().into_owned());
         let data = info.with_extension(ext);
-        let Ok(meta) = fs::metadata(&data) else { continue };
-        out.push(Version { data, original, name, when, kind, size: meta.len() });
+        let Ok(meta) = fs::metadata(&data) else {
+            continue;
+        };
+        out.push(Version {
+            data,
+            original,
+            name,
+            when,
+            kind,
+            size: meta.len(),
+        });
     }
     out.sort_by(|a, b| b.when.cmp(&a.when).then_with(|| b.data.cmp(&a.data)));
     out
@@ -388,8 +437,12 @@ mod tests {
     #[test]
     fn registro_de_recuperacao_e_lido_de_volta() {
         let (pid, saved, name, original) =
-            parse_meta("pid=42\nsaved=1700000000\nname=dados.xml\noriginal=/home/x/dados.xml\n").unwrap();
-        assert_eq!((pid, saved, name.as_str()), (42, 1_700_000_000, "dados.xml"));
+            parse_meta("pid=42\nsaved=1700000000\nname=dados.xml\noriginal=/home/x/dados.xml\n")
+                .unwrap();
+        assert_eq!(
+            (pid, saved, name.as_str()),
+            (42, 1_700_000_000, "dados.xml")
+        );
         assert_eq!(original, Some(PathBuf::from("/home/x/dados.xml")));
         let (_, _, _, original) = parse_meta("pid=1\noriginal=\n").unwrap();
         assert!(original.is_none(), "documento novo, nunca salvo");
@@ -398,10 +451,20 @@ mod tests {
 
     #[test]
     fn registro_de_versao_e_lido_de_volta() {
-        let text = version_info(Path::new("/nao/existe/dados.xml"), 1_700_000_000, Kind::Editing);
+        let text = version_info(
+            Path::new("/nao/existe/dados.xml"),
+            1_700_000_000,
+            Kind::Editing,
+        );
         let (original, name, when, kind) = parse_version_info(&text).unwrap();
         assert_eq!(original, PathBuf::from("/nao/existe/dados.xml"));
-        assert_eq!((name.as_str(), when, kind), ("dados.xml", 1_700_000_000, Kind::Editing));
-        assert!(parse_version_info("kind=salvo\n").is_none(), "sem arquivo de origem");
+        assert_eq!(
+            (name.as_str(), when, kind),
+            ("dados.xml", 1_700_000_000, Kind::Editing)
+        );
+        assert!(
+            parse_version_info("kind=salvo\n").is_none(),
+            "sem arquivo de origem"
+        );
     }
 }

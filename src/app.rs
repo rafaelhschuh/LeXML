@@ -1,8 +1,8 @@
 use crate::document::DocumentView;
+use crate::i18n::tr;
 use crate::textdoc::TextDocView;
 use crate::xmldoc::{QueryResult, XmlDoc};
 use crate::{backup, config, dialog, i18n, recent};
-use crate::i18n::tr;
 use gtk::glib::clone;
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -179,7 +179,9 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         let current = current.clone();
         let title = title.clone();
         Rc::new(move |path: PathBuf| {
-            let Some(window) = window.upgrade() else { return };
+            let Some(window) = window.upgrade() else {
+                return;
+            };
             if current.borrow().is_some() {
                 build_window(&app, Initial::Open(path)).present();
             } else {
@@ -192,7 +194,9 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         let window = window.clone();
         let open_path = open_path.clone();
         move || {
-            let dialog = gtk::FileDialog::builder().title(tr("open_xml_title")).build();
+            let dialog = gtk::FileDialog::builder()
+                .title(tr("open_xml_title"))
+                .build();
             let filter = gtk::FileFilter::new();
             filter.set_name(Some(tr("xml_files")));
             filter.add_pattern("*.xml");
@@ -311,8 +315,12 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
 
     // volta à tela inicial, fechando o documento desta janela
     {
-        let (window_w, stack, current, title) =
-            (window.downgrade(), stack.clone(), current.clone(), title.clone());
+        let (window_w, stack, current, title) = (
+            window.downgrade(),
+            stack.clone(),
+            current.clone(),
+            title.clone(),
+        );
         let refresh_recent = refresh_recent.clone();
         home_btn.connect_clicked(move |_| {
             let Some(window) = window_w.upgrade() else { return };
@@ -339,7 +347,14 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         Initial::Open(path) => open_checked(&path, &window, &stack, &current, &title),
         Initial::Recover(orphan) => {
             let data = orphan.data.clone();
-            open_into(&data, &window, &stack, &current, &title, Source::Recovery(orphan));
+            open_into(
+                &data,
+                &window,
+                &stack,
+                &current,
+                &title,
+                Source::Recovery(orphan),
+            );
         }
         Initial::Blank => blank_into(&window, &stack, &current, &title),
         Initial::Empty => {}
@@ -364,24 +379,30 @@ fn confirm_unsaved(
         .modal(true)
         .message(tr("unsaved_title"))
         .detail(tr("unsaved_body"))
-        .buttons([tr("cancel"), tr("close_without_saving"), tr("save_ellipsis")])
+        .buttons([
+            tr("cancel"),
+            tr("close_without_saving"),
+            tr("save_ellipsis"),
+        ])
         .cancel_button(0)
         .default_button(2)
         .build();
     let current = current.clone();
-    alert.choose(Some(win), gio::Cancellable::NONE, move |res| match res.unwrap_or(0) {
-        1 => proceed(),
-        2 => {
-            if let Some(doc) = current.borrow().as_ref() {
-                let proceed = proceed.clone();
-                doc.save_then(move |ok| {
-                    if ok {
-                        proceed();
-                    }
-                });
+    alert.choose(Some(win), gio::Cancellable::NONE, move |res| {
+        match res.unwrap_or(0) {
+            1 => proceed(),
+            2 => {
+                if let Some(doc) = current.borrow().as_ref() {
+                    let proceed = proceed.clone();
+                    doc.save_then(move |ok| {
+                        if ok {
+                            proceed();
+                        }
+                    });
+                }
             }
+            _ => {}
         }
-        _ => {}
     });
 }
 
@@ -437,17 +458,34 @@ fn open_checked(
 
     let restored = Rc::new(std::cell::Cell::new(false));
     let on_restore: Rc<dyn Fn(backup::Orphan)> = {
-        let (window, stack, current, title) = (window.clone(), stack.clone(), current.clone(), title.clone());
+        let (window, stack, current, title) = (
+            window.clone(),
+            stack.clone(),
+            current.clone(),
+            title.clone(),
+        );
         let restored = restored.clone();
         Rc::new(move |o: backup::Orphan| {
             restored.set(true);
             let data = o.data.clone();
-            open_into(&data, &window, &stack, &current, &title, Source::Recovery(o));
+            open_into(
+                &data,
+                &window,
+                &stack,
+                &current,
+                &title,
+                Source::Recovery(o),
+            );
         })
     };
     // Descartar ou decidir depois: abre o arquivo como está em disco.
     let on_finish: Box<dyn FnOnce()> = {
-        let (window, stack, current, title) = (window.clone(), stack.clone(), current.clone(), title.clone());
+        let (window, stack, current, title) = (
+            window.clone(),
+            stack.clone(),
+            current.clone(),
+            title.clone(),
+        );
         let path = path.to_path_buf();
         Box::new(move || {
             if !restored.get() {
@@ -671,10 +709,15 @@ fn install_doc(
     stack.add_named(&widget, Some("doc"));
     if let OpenDoc::Table(view) = &doc {
         // Restaurar uma versão do histórico troca o documento desta janela.
-        let (window, stack, current, title) =
-            (window.downgrade(), stack.downgrade(), Rc::downgrade(current), title.clone());
+        let (window, stack, current, title) = (
+            window.downgrade(),
+            stack.downgrade(),
+            Rc::downgrade(current),
+            title.clone(),
+        );
         view.set_restore_handler(Rc::new(move |v: backup::Version| {
-            let (Some(window), Some(stack), Some(current)) = (window.upgrade(), stack.upgrade(), current.upgrade())
+            let (Some(window), Some(stack), Some(current)) =
+                (window.upgrade(), stack.upgrade(), current.upgrade())
             else {
                 return;
             };
@@ -745,7 +788,12 @@ fn open_into(
 ) {
     let label = match &source {
         Source::Recovery(o) => format!("{} ({})", o.name, tr("recovered")),
-        Source::Version(v) => format!("{} ({} {})", v.name, tr("version_of"), crate::history::format_when(v.when)),
+        Source::Version(v) => format!(
+            "{} ({} {})",
+            v.name,
+            tr("version_of"),
+            crate::history::format_when(v.when)
+        ),
         Source::File => path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -785,7 +833,9 @@ fn open_into(
                 // Na recuperação, o documento "é" o arquivo de origem (Salvar
                 // grava nele), não a cópia que está no cache.
                 let view_path = match &source {
-                    Source::Recovery(o) => o.original.clone().unwrap_or_else(|| PathBuf::from(&o.name)),
+                    Source::Recovery(o) => {
+                        o.original.clone().unwrap_or_else(|| PathBuf::from(&o.name))
+                    }
                     Source::Version(v) => v.original.clone(),
                     Source::File => {
                         recent::add(&path_ui);
@@ -864,7 +914,11 @@ fn read_text(path: &Path) -> TextLoad {
         truncated = buf.len() as u64 >= MAX_TEXT_BYTES;
     }
     match String::from_utf8(buf) {
-        Ok(text) => TextLoad { text, read_only: truncated, note: None },
+        Ok(text) => TextLoad {
+            text,
+            read_only: truncated,
+            note: None,
+        },
         Err(e) => TextLoad {
             text: String::from_utf8_lossy(e.as_bytes()).into_owned(),
             read_only: true,
@@ -908,7 +962,9 @@ fn blank_into(
 /// do sistema (e a cor de destaque dele). Só sobrepomos claro/escuro quando o
 /// usuário escolhe explicitamente; em "system" deixamos o GTK seguir o desktop.
 fn apply_theme(scheme: &str) {
-    let Some(settings) = gtk::Settings::default() else { return };
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
     match scheme {
         "dark" => settings.set_gtk_application_prefer_dark_theme(true),
         "light" => settings.set_gtk_application_prefer_dark_theme(false),
@@ -949,13 +1005,20 @@ fn capture_shortcut(
     let current = gtk::Label::builder()
         .label(format!("{}: {}", tr("sc_current"), {
             let l = crate::shortcuts::label(action.id);
-            if l.is_empty() { tr("sc_none").to_string() } else { l }
+            if l.is_empty() {
+                tr("sc_none").to_string()
+            } else {
+                l
+            }
         }))
         .xalign(0.0)
         .build();
     current.add_css_class("dim-label");
     root.append(&current);
-    let hint = gtk::Label::builder().label(tr("sc_press_hint")).xalign(0.0).build();
+    let hint = gtk::Label::builder()
+        .label(tr("sc_press_hint"))
+        .xalign(0.0)
+        .build();
     hint.add_css_class("dim-label");
     root.append(&hint);
 
@@ -1048,11 +1111,8 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
     lang_dd.set_selected(if cfg.lang.starts_with("en") { 1 } else { 0 });
     geral.append(&pref_row(tr("language"), &lang_dd));
 
-    let theme_dd = gtk::DropDown::from_strings(&[
-        tr("theme_system"),
-        tr("theme_light"),
-        tr("theme_dark"),
-    ]);
+    let theme_dd =
+        gtk::DropDown::from_strings(&[tr("theme_system"), tr("theme_light"), tr("theme_dark")]);
     theme_dd.set_selected(match cfg.theme.as_str() {
         "light" => 1,
         "dark" => 2,
@@ -1161,7 +1221,11 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
         Rc::new(move || {
             for (id, l) in sc_values.iter() {
                 let text = crate::shortcuts::label(id);
-                l.set_text(if text.is_empty() { tr("sc_none") } else { &text });
+                l.set_text(if text.is_empty() {
+                    tr("sc_none")
+                } else {
+                    &text
+                });
             }
         })
     };
@@ -1174,13 +1238,19 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
             .margin_start(10)
             .margin_end(6)
             .build();
-        let name = gtk::Label::builder().label(tr(action.label)).xalign(0.0).hexpand(true).build();
+        let name = gtk::Label::builder()
+            .label(tr(action.label))
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
         value.add_css_class("dim-label");
         let change = gtk::Button::with_label(tr("sc_change"));
         change.add_css_class("flat");
         {
             let (win, refresh_sc, sc_note) = (win.clone(), refresh_sc.clone(), sc_note.clone());
-            change.connect_clicked(move |_| capture_shortcut(&win, action, refresh_sc.clone(), sc_note.clone()));
+            change.connect_clicked(move |_| {
+                capture_shortcut(&win, action, refresh_sc.clone(), sc_note.clone())
+            });
         }
         line.append(&name);
         line.append(value);
@@ -1194,11 +1264,18 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
         .child(&sc_list)
         .build();
     sc.append(&sc_scroll);
-    let sc_hint = gtk::Label::builder().label(tr("sc_hint")).wrap(true).xalign(0.0).build();
+    let sc_hint = gtk::Label::builder()
+        .label(tr("sc_hint"))
+        .wrap(true)
+        .xalign(0.0)
+        .build();
     sc_hint.add_css_class("dim-label");
     sc.append(&sc_hint);
     sc.append(&sc_note);
-    let sc_reset = gtk::Button::builder().label(tr("sc_reset_all")).halign(gtk::Align::Start).build();
+    let sc_reset = gtk::Button::builder()
+        .label(tr("sc_reset_all"))
+        .halign(gtk::Align::Start)
+        .build();
     {
         let (refresh_sc, sc_note) = (refresh_sc.clone(), sc_note.clone());
         sc_reset.connect_clicked(move |_| {
@@ -1236,11 +1313,7 @@ fn show_settings(parent: &gtk::ApplicationWindow) {
         .build();
     repo_btn.add_css_class("link");
     repo_btn.connect_clicked(|_| {
-        gtk::UriLauncher::new(REPO_URL).launch(
-            gtk::Window::NONE,
-            gio::Cancellable::NONE,
-            |_| {},
-        );
+        gtk::UriLauncher::new(REPO_URL).launch(gtk::Window::NONE, gio::Cancellable::NONE, |_| {});
     });
     sobre.append(&info_row(tr("repository"), ""));
     sobre.append(&repo_btn);
@@ -1269,7 +1342,11 @@ fn pref_row(label: &str, widget: &impl IsA<gtk::Widget>) -> gtk::Box {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    let lbl = gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build();
+    let lbl = gtk::Label::builder()
+        .label(label)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
     row.append(&lbl);
     widget.set_halign(gtk::Align::End);
     widget.set_valign(gtk::Align::Center);
@@ -1283,7 +1360,11 @@ fn info_row(label: &str, value: &str) -> gtk::Box {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    let lbl = gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build();
+    let lbl = gtk::Label::builder()
+        .label(label)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
     row.append(&lbl);
     if !value.is_empty() {
         let val = gtk::Label::builder().label(value).xalign(1.0).build();
@@ -1429,7 +1510,7 @@ pub fn run() -> glib::ExitCode {
                 box-shadow: none;
                 border-radius: 6px;
             }
-            "
+            ",
         );
         gtk::style_context_add_provider_for_display(
             &gtk::gdk::Display::default().expect("Não foi possível conectar ao display"),
@@ -1473,7 +1554,10 @@ pub fn run() -> glib::ExitCode {
             let window = build_window(app, Initial::Empty);
             window.present();
         }
-        if let Some(w) = app.active_window().and_then(|w| w.downcast::<gtk::ApplicationWindow>().ok()) {
+        if let Some(w) = app
+            .active_window()
+            .and_then(|w| w.downcast::<gtk::ApplicationWindow>().ok())
+        {
             offer_recovery(app, &w);
         }
     });

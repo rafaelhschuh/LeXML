@@ -36,10 +36,17 @@ pub fn show_dialog(
         .margin_start(18)
         .margin_end(18)
         .build();
-    let heading = gtk::Label::builder().label(tr("recover_title")).xalign(0.0).build();
+    let heading = gtk::Label::builder()
+        .label(tr("recover_title"))
+        .xalign(0.0)
+        .build();
     heading.add_css_class("title-2");
     root.append(&heading);
-    let body = gtk::Label::builder().label(tr("recover_body")).wrap(true).xalign(0.0).build();
+    let body = gtk::Label::builder()
+        .label(tr("recover_body"))
+        .wrap(true)
+        .xalign(0.0)
+        .build();
     body.add_css_class("dim-label");
     root.append(&body);
 
@@ -86,7 +93,8 @@ pub fn show_dialog(
 
         // Tira a linha do diálogo; o último a sair fecha a janela.
         let done: Rc<dyn Fn()> = {
-            let (list, row, remaining, win) = (list.clone(), row.clone(), remaining.clone(), win.clone());
+            let (list, row, remaining, win) =
+                (list.clone(), row.clone(), remaining.clone(), win.clone());
             Rc::new(move || {
                 list.remove(&row);
                 remaining.set(remaining.get().saturating_sub(1));
@@ -123,7 +131,14 @@ pub fn show_dialog(
             let (win, restore, discard) = (win.clone(), restore.clone(), discard.clone());
             diff_btn.connect_clicked(move |_| {
                 if let Some(before) = original.clone() {
-                    show_diff(win.upcast_ref(), before, data.clone(), &label, restore.clone(), discard.clone());
+                    show_diff(
+                        win.upcast_ref(),
+                        before,
+                        data.clone(),
+                        &label,
+                        restore.clone(),
+                        discard.clone(),
+                    );
                 }
             });
         }
@@ -241,7 +256,8 @@ fn show_diff(
     win.present();
 
     // A comparação abre os dois arquivos: fora da thread da interface.
-    let handle = gio::spawn_blocking(move || diff::diff_files(&before, &after).map_err(|e| e.to_string()));
+    let handle =
+        gio::spawn_blocking(move || diff::diff_files(&before, &after).map_err(|e| e.to_string()));
     glib::spawn_future_local(async move {
         let res = handle.await.unwrap_or_else(|_| Err(String::new()));
         pane.show(res);
@@ -257,8 +273,15 @@ pub struct DiffTexts {
 }
 
 /// Classes de cor das células da tabela de diferenças (ver CSS em `app`).
-const DIFF_CLASSES: [&str; 7] =
-    ["diff-add", "diff-del", "diff-chg", "diff-gap", "diff-cell-chg", "diff-col-add", "diff-col-del"];
+const DIFF_CLASSES: [&str; 7] = [
+    "diff-add",
+    "diff-del",
+    "diff-chg",
+    "diff-gap",
+    "diff-cell-chg",
+    "diff-col-add",
+    "diff-col-del",
+];
 
 /// Resumo + tabela com as linhas incluídas, apagadas e alteradas,
 /// reaproveitado pela recuperação e pelo histórico de versões.
@@ -281,7 +304,11 @@ impl DiffPane {
         summary.add_css_class("heading");
         head.append(&summary);
         root.append(&head);
-        let legend = gtk::Label::builder().label(texts.legend).xalign(0.0).wrap(true).build();
+        let legend = gtk::Label::builder()
+            .label(texts.legend)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
         legend.add_css_class("dim-label");
         root.append(&legend);
 
@@ -294,11 +321,22 @@ impl DiffPane {
             .build();
         view.add_css_class("data-table");
         view.add_css_class("diff-table");
-        let scroller = gtk::ScrolledWindow::builder().vexpand(true).hexpand(true).child(&view).build();
+        let scroller = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hexpand(true)
+            .child(&view)
+            .build();
         scroller.add_css_class("frame");
         root.append(&scroller);
 
-        let pane = Self { root, spinner, summary, view, store, texts };
+        let pane = Self {
+            root,
+            spinner,
+            summary,
+            view,
+            store,
+            texts,
+        };
         pane.loading();
         pane
     }
@@ -336,9 +374,16 @@ impl DiffPane {
                 tr("diff_changed")
             )
         };
-        for (state, key) in [(ColState::Removed, "diff_cols_removed"), (ColState::Added, "diff_cols_added")] {
-            let names: Vec<&str> =
-                d.columns.iter().filter(|(_, st)| *st == state).map(|(n, _)| n.as_str()).collect();
+        for (state, key) in [
+            (ColState::Removed, "diff_cols_removed"),
+            (ColState::Added, "diff_cols_added"),
+        ] {
+            let names: Vec<&str> = d
+                .columns
+                .iter()
+                .filter(|(_, st)| *st == state)
+                .map(|(n, _)| n.as_str())
+                .collect();
             if !names.is_empty() {
                 head_text.push_str(&format!("\n{}: {}", tr(key), names.join(", ")));
             }
@@ -349,21 +394,28 @@ impl DiffPane {
         self.summary.set_text(&head_text);
 
         // As colunas mudam a cada comparação: refaz todas.
-        let old: Vec<gtk::ColumnViewColumn> =
-            self.view.columns().iter::<gtk::ColumnViewColumn>().flatten().collect();
+        let old: Vec<gtk::ColumnViewColumn> = self
+            .view
+            .columns()
+            .iter::<gtk::ColumnViewColumn>()
+            .flatten()
+            .collect();
         for c in old {
             self.view.remove_column(&c);
         }
-        self.view.append_column(&diff_column("", None, ColState::Same));
+        self.view
+            .append_column(&diff_column("", None, ColState::Same));
         for (k, (name, state)) in d.columns.iter().enumerate() {
             let title = match state {
                 ColState::Same => name.clone(),
                 ColState::Added => format!("{name} {}", tr("diff_col_added_tag")),
                 ColState::Removed => format!("{name} {}", tr("diff_col_removed_tag")),
             };
-            self.view.append_column(&diff_column(&title, Some(k), *state));
+            self.view
+                .append_column(&diff_column(&title, Some(k), *state));
         }
-        let items: Vec<glib::BoxedAnyObject> = d.rows.into_iter().map(glib::BoxedAnyObject::new).collect();
+        let items: Vec<glib::BoxedAnyObject> =
+            d.rows.into_iter().map(glib::BoxedAnyObject::new).collect();
         self.store.extend_from_slice(&items);
     }
 }
@@ -373,7 +425,9 @@ impl DiffPane {
 fn diff_column(title: &str, k: Option<usize>, state: ColState) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
-        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
         let label = gtk::Label::builder()
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -381,10 +435,13 @@ fn diff_column(title: &str, k: Option<usize>, state: ColState) -> gtk::ColumnVie
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, item| {
-        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
-        let (Some(obj), Some(label)) =
-            (item.item().and_downcast::<glib::BoxedAnyObject>(), item.child().and_downcast::<gtk::Label>())
-        else {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let (Some(obj), Some(label)) = (
+            item.item().and_downcast::<glib::BoxedAnyObject>(),
+            item.child().and_downcast::<gtk::Label>(),
+        ) else {
             return;
         };
         let row = obj.borrow::<DiffRow>();

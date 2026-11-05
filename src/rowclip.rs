@@ -44,7 +44,9 @@ pub fn parse_rows(text: &str) -> Option<Vec<Vec<(String, String)>>> {
                 let mut attrs = Vec::new();
                 for a in e.attributes().flatten() {
                     let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-                    let Ok(val) = a.unescape_value() else { continue };
+                    let Ok(val) = a.unescape_value() else {
+                        continue;
+                    };
                     attrs.push((key, val.into_owned()));
                 }
                 rows.push(attrs);
@@ -75,7 +77,13 @@ mod tests {
             "<ROW id=\"1\" hist=\"a &quot;b&quot; &amp; &lt;c&gt;&#10;linha 2\"/>\n<ROW id=\"2\"/>\n"
         );
         let back = parse_rows(&text).unwrap();
-        assert_eq!(back[0], vec![("id".into(), "1".into()), ("hist".into(), "a \"b\" & <c>\nlinha 2".into())]);
+        assert_eq!(
+            back[0],
+            vec![
+                ("id".into(), "1".into()),
+                ("hist".into(), "a \"b\" & <c>\nlinha 2".into())
+            ]
+        );
         assert_eq!(back[1], vec![("id".to_string(), "2".to_string())]);
     }
 

@@ -44,14 +44,22 @@ struct ColSnap {
 /// Uma alteração registrada no histórico. Cada variante sabe se aplicar nos
 /// dois sentidos: para frente (refazer) e para trás (desfazer).
 enum Op {
-    Cell { rowid: i64, col: String, old: String, new: String },
+    Cell {
+        rowid: i64,
+        col: String,
+        old: String,
+        new: String,
+    },
     InsertRow(RowSnap),
     DeleteRow(RowSnap),
     /// Troca de posição entre duas linhas — é a própria inversa.
     SwapRows(i64, i64),
     AddColumn(ColSnap),
     DropColumn(ColSnap),
-    RenameColumn { old: String, new: String },
+    RenameColumn {
+        old: String,
+        new: String,
+    },
     /// Várias alterações de célula desfeitas e refeitas como um passo só
     /// (Substituir todas).
     Batch(Vec<Op>),
@@ -67,17 +75,37 @@ struct History {
 /// afetado da grade, sem recarregar a tabela inteira.
 pub enum Change {
     /// Uma célula mudou de valor.
-    Cell { rowid: i64, column: String, value: String },
+    Cell {
+        rowid: i64,
+        column: String,
+        value: String,
+    },
     /// Uma linha voltou a existir (na posição de ordem que tinha).
-    RowAdded { rowid: i64 },
+    RowAdded {
+        rowid: i64,
+    },
     /// Uma linha deixou de existir.
-    RowRemoved { rowid: i64 },
+    RowRemoved {
+        rowid: i64,
+    },
     /// Duas linhas vizinhas trocaram de posição.
-    RowsSwapped { a: i64, b: i64 },
+    RowsSwapped {
+        a: i64,
+        b: i64,
+    },
     /// Uma coluna voltou a existir em `index`, com os valores não vazios.
-    ColumnAdded { index: usize, name: String, values: HashMap<i64, String> },
-    ColumnRemoved { name: String },
-    ColumnRenamed { from: String, to: String },
+    ColumnAdded {
+        index: usize,
+        name: String,
+        values: HashMap<i64, String>,
+    },
+    ColumnRemoved {
+        name: String,
+    },
+    ColumnRenamed {
+        from: String,
+        to: String,
+    },
     /// Várias células mudaram de valor: (rowid, coluna, valor).
     Cells(Vec<(i64, String, String)>),
     /// Várias mudanças de linhas desfeitas/refeitas juntas (colar, excluir
@@ -136,8 +164,8 @@ impl XmlDoc {
         let params_xml = extract_params(&head).unwrap_or_else(|| DEFAULT_PARAMS.into());
         drop(head);
 
-        let mut reader = Reader::from_file(path)
-            .with_context(|| format!("abrindo {}", path.display()))?;
+        let mut reader =
+            Reader::from_file(path).with_context(|| format!("abrindo {}", path.display()))?;
         reader.config_mut().trim_text(false);
 
         let mut fields: Vec<Field> = Vec::new();
@@ -238,7 +266,9 @@ impl XmlDoc {
 
         drop(stmt);
         if field_names.is_empty() {
-            return Err(anyhow!("XML não reconhecido: faltam as seções METADATA/FIELDS"));
+            return Err(anyhow!(
+                "XML não reconhecido: faltam as seções METADATA/FIELDS"
+            ));
         }
         if !table_ready {
             rid_col = unique_name("__rid", &field_names);
@@ -301,7 +331,11 @@ impl XmlDoc {
     }
 
     pub fn field_names(&self) -> Vec<String> {
-        self.fields.borrow().iter().map(|f| f.name.clone()).collect()
+        self.fields
+            .borrow()
+            .iter()
+            .map(|f| f.name.clone())
+            .collect()
     }
 
     /// Adiciona uma nova coluna (TEXT) ao final.
@@ -332,7 +366,10 @@ impl XmlDoc {
             bail!("já existe uma coluna com esse nome");
         }
         self.rename_column_raw(old, new)?;
-        self.record(Op::RenameColumn { old: old.to_string(), new: new.to_string() });
+        self.record(Op::RenameColumn {
+            old: old.to_string(),
+            new: new.to_string(),
+        });
         Ok(())
     }
 
@@ -380,8 +417,10 @@ impl XmlDoc {
     }
 
     fn drop_column_raw(&self, name: &str) -> Result<()> {
-        self.db
-            .execute(&format!("ALTER TABLE dados DROP COLUMN {}", quote_ident(name)), [])?;
+        self.db.execute(
+            &format!("ALTER TABLE dados DROP COLUMN {}", quote_ident(name)),
+            [],
+        )?;
         self.fields.borrow_mut().retain(|f| f.name != name);
         Ok(())
     }
@@ -402,16 +441,24 @@ impl XmlDoc {
             self.q_rid()
         ))?;
         let values = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, value_to_string(&r.get(1)?))))?
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, value_to_string(&r.get(1)?)))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(ColSnap { index, field, values })
+        Ok(ColSnap {
+            index,
+            field,
+            values,
+        })
     }
 
     /// Recria uma coluna na posição e com os valores da fotografia.
     fn restore_column(&self, snap: &ColSnap) -> Result<()> {
         let name = &snap.field.name;
-        self.db
-            .execute(&format!("ALTER TABLE dados ADD COLUMN {} TEXT", quote_ident(name)), [])?;
+        self.db.execute(
+            &format!("ALTER TABLE dados ADD COLUMN {} TEXT", quote_ident(name)),
+            [],
+        )?;
         {
             let mut fields = self.fields.borrow_mut();
             let at = snap.index.min(fields.len());
@@ -454,7 +501,11 @@ impl XmlDoc {
         vals.push(Value::Real(ord));
         let ph: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         self.db.execute(
-            &format!("INSERT INTO dados ({}) VALUES ({})", cols.join(", "), ph.join(", ")),
+            &format!(
+                "INSERT INTO dados ({}) VALUES ({})",
+                cols.join(", "),
+                ph.join(", ")
+            ),
             rusqlite::params_from_iter(vals),
         )?;
         let rowid = self.db.last_insert_rowid();
@@ -485,7 +536,11 @@ impl XmlDoc {
     }
 
     fn ord_of(&self, rowid: i64) -> Result<f64> {
-        let sql = format!("SELECT {} FROM dados WHERE {} = ?1", self.q_ord(), self.q_rid());
+        let sql = format!(
+            "SELECT {} FROM dados WHERE {} = ?1",
+            self.q_ord(),
+            self.q_rid()
+        );
         Ok(self.db.query_row(&sql, [rowid], |r| r.get(0))?)
     }
 
@@ -510,7 +565,11 @@ impl XmlDoc {
         let names = self.field_names();
         let mut sel = vec![self.q_ord()];
         sel.extend(names.iter().map(|n| quote_ident(n)));
-        let sql = format!("SELECT {} FROM dados WHERE {} = ?1", sel.join(", "), self.q_rid());
+        let sql = format!(
+            "SELECT {} FROM dados WHERE {} = ?1",
+            sel.join(", "),
+            self.q_rid()
+        );
         Ok(self.db.query_row(&sql, [rowid], |r| {
             let ord: f64 = r.get(0)?;
             let mut values = Vec::with_capacity(names.len());
@@ -531,7 +590,11 @@ impl XmlDoc {
         }
         let ph: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         self.db.execute(
-            &format!("INSERT INTO dados ({}) VALUES ({})", cols.join(", "), ph.join(", ")),
+            &format!(
+                "INSERT INTO dados ({}) VALUES ({})",
+                cols.join(", "),
+                ph.join(", ")
+            ),
             rusqlite::params_from_iter(params),
         )?;
         Ok(())
@@ -566,7 +629,11 @@ impl XmlDoc {
             bail!("documento sem colunas");
         }
         // lê os valores da linha de origem
-        let sel = names.iter().map(|n| quote_ident(n)).collect::<Vec<_>>().join(", ");
+        let sel = names
+            .iter()
+            .map(|n| quote_ident(n))
+            .collect::<Vec<_>>()
+            .join(", ");
         let vals: Vec<String> = {
             let mut stmt = self.db.prepare(&format!(
                 "SELECT {sel} FROM dados WHERE {} = ?1",
@@ -631,7 +698,11 @@ impl XmlDoc {
     /// Troca os `__ord` de duas linhas.
     fn swap_rows(&self, a: i64, b: i64) -> Result<()> {
         let (ord_a, ord_b) = (self.ord_of(a)?, self.ord_of(b)?);
-        let upd = format!("UPDATE dados SET {} = ?1 WHERE {} = ?2", self.q_ord(), self.q_rid());
+        let upd = format!(
+            "UPDATE dados SET {} = ?1 WHERE {} = ?2",
+            self.q_ord(),
+            self.q_rid()
+        );
         self.db.execute(&upd, rusqlite::params![ord_b, a])?;
         self.db.execute(&upd, rusqlite::params![ord_a, b])?;
         Ok(())
@@ -647,7 +718,11 @@ impl XmlDoc {
     /// As colunas são listadas explicitamente (nada de `SELECT *`) para que
     /// nenhuma coluna de controle vaze para a tabela exibida.
     pub fn filter(&self, where_clause: Option<&str>) -> Result<QueryResult> {
-        let mut sel = vec![format!("{} AS {}", self.q_rid(), quote_ident(&self.rid_alias))];
+        let mut sel = vec![format!(
+            "{} AS {}",
+            self.q_rid(),
+            quote_ident(&self.rid_alias)
+        )];
         sel.extend(self.field_names().iter().map(|n| quote_ident(n)));
         let mut sql = format!("SELECT {} FROM dados", sel.join(", "));
         if let Some(w) = where_clause {
@@ -704,7 +779,11 @@ impl XmlDoc {
 
     pub fn update_cell(&self, rowid: i64, column: &str, value: &str) -> Result<()> {
         let old: Value = self.db.query_row(
-            &format!("SELECT {} FROM dados WHERE {} = ?1", quote_ident(column), self.q_rid()),
+            &format!(
+                "SELECT {} FROM dados WHERE {} = ?1",
+                quote_ident(column),
+                self.q_rid()
+            ),
             [rowid],
             |r| r.get(0),
         )?;
@@ -762,7 +841,12 @@ impl XmlDoc {
             }
             self.update_cell_raw(*rowid, column, value)?;
             if let Some(ops) = self.pending.borrow_mut().as_mut() {
-                ops.push(Op::Cell { rowid: *rowid, col: column.clone(), old, new: value.clone() });
+                ops.push(Op::Cell {
+                    rowid: *rowid,
+                    col: column.clone(),
+                    old,
+                    new: value.clone(),
+                });
             }
             n += 1;
         }
@@ -797,7 +881,9 @@ impl XmlDoc {
             self.q_rid()
         );
         // Em cache: substituir em lote repete o mesmo comando milhares de vezes.
-        self.db.prepare_cached(&sql)?.execute(rusqlite::params![value, rowid])?;
+        self.db
+            .prepare_cached(&sql)?
+            .execute(rusqlite::params![value, rowid])?;
         Ok(())
     }
 
@@ -846,13 +932,21 @@ impl XmlDoc {
         match applied {
             Ok(change) => {
                 tx.commit()?;
-                if forward { h.undo.push(op) } else { h.redo.push(op) }
+                if forward {
+                    h.undo.push(op)
+                } else {
+                    h.redo.push(op)
+                }
                 Ok(Some(change))
             }
             Err(e) => {
                 drop(tx);
                 // devolve a operação para onde estava
-                if forward { h.redo.push(op) } else { h.undo.push(op) }
+                if forward {
+                    h.redo.push(op)
+                } else {
+                    h.undo.push(op)
+                }
                 Err(e)
             }
         }
@@ -861,10 +955,19 @@ impl XmlDoc {
     /// Aplica `op` para frente (refazer) ou para trás (desfazer), sem registrar.
     fn apply(&self, op: &Op, forward: bool) -> Result<Change> {
         Ok(match op {
-            Op::Cell { rowid, col, old, new } => {
+            Op::Cell {
+                rowid,
+                col,
+                old,
+                new,
+            } => {
                 let value = if forward { new } else { old };
                 self.update_cell_raw(*rowid, col, value)?;
-                Change::Cell { rowid: *rowid, column: col.clone(), value: value.clone() }
+                Change::Cell {
+                    rowid: *rowid,
+                    column: col.clone(),
+                    value: value.clone(),
+                }
             }
             Op::InsertRow(s) | Op::DeleteRow(s) => {
                 let insert = forward == matches!(op, Op::InsertRow(_));
@@ -913,7 +1016,11 @@ impl XmlDoc {
                         changes
                             .into_iter()
                             .filter_map(|c| match c {
-                                Change::Cell { rowid, column, value } => Some((rowid, column, value)),
+                                Change::Cell {
+                                    rowid,
+                                    column,
+                                    value,
+                                } => Some((rowid, column, value)),
                                 _ => None,
                             })
                             .collect(),
@@ -925,7 +1032,10 @@ impl XmlDoc {
             Op::RenameColumn { old, new } => {
                 let (from, to) = if forward { (old, new) } else { (new, old) };
                 self.rename_column_raw(from, to)?;
-                Change::ColumnRenamed { from: from.clone(), to: to.clone() }
+                Change::ColumnRenamed {
+                    from: from.clone(),
+                    to: to.clone(),
+                }
             }
         })
     }
@@ -933,9 +1043,11 @@ impl XmlDoc {
     /// Posição (`__ord`) de cada linha, para devolver a grade à ordem do
     /// documento depois de ordená-la por uma coluna.
     pub fn row_orders(&self) -> Result<HashMap<i64, f64>> {
-        let mut stmt = self
-            .db
-            .prepare(&format!("SELECT {}, {} FROM dados", self.q_rid(), self.q_ord()))?;
+        let mut stmt = self.db.prepare(&format!(
+            "SELECT {}, {} FROM dados",
+            self.q_rid(),
+            self.q_ord()
+        ))?;
         let map = stmt
             .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))?
             .collect::<rusqlite::Result<HashMap<_, _>>>()?;
@@ -1012,7 +1124,11 @@ impl XmlDoc {
             let values: Vec<String> = names
                 .iter()
                 .map(|n| {
-                    attrs.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap_or_default()
+                    attrs
+                        .iter()
+                        .find(|(k, _)| k == n)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default()
                 })
                 .collect();
             let ord = lo + (hi - lo) * (i as f64 + 1.0) / (k + 1.0);
@@ -1057,7 +1173,11 @@ impl XmlDoc {
 
     /// Valores das linhas `rowids` que passam pelo filtro, na ordem do
     /// documento: (rowid, valores na ordem de `field_names()`).
-    pub fn visible_rows(&self, rowids: &[i64], where_clause: &str) -> Result<Vec<(i64, Vec<String>)>> {
+    pub fn visible_rows(
+        &self,
+        rowids: &[i64],
+        where_clause: &str,
+    ) -> Result<Vec<(i64, Vec<String>)>> {
         if rowids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1089,7 +1209,11 @@ impl XmlDoc {
     /// passar pelo filtro `where_clause`.
     pub fn visible_row(&self, rowid: i64, where_clause: &str) -> Result<Option<Vec<String>>> {
         let sel: Vec<String> = self.field_names().iter().map(|n| quote_ident(n)).collect();
-        let mut sql = format!("SELECT {} FROM dados WHERE {} = {rowid}", sel.join(", "), self.q_rid());
+        let mut sql = format!(
+            "SELECT {} FROM dados WHERE {} = {rowid}",
+            sel.join(", "),
+            self.q_rid()
+        );
         if !where_clause.trim().is_empty() {
             sql.push_str(&format!(" AND ({where_clause})"));
         }
@@ -1098,12 +1222,16 @@ impl XmlDoc {
 
     /// Primeira linha depois de `rowid`, na ordem do documento, que satisfaz
     /// `pred`. Serve para achar onde reinserir uma linha numa visão filtrada.
-    pub fn next_row_where(&self, rowid: i64, mut pred: impl FnMut(i64) -> bool) -> Result<Option<i64>> {
+    pub fn next_row_where(
+        &self,
+        rowid: i64,
+        mut pred: impl FnMut(i64) -> bool,
+    ) -> Result<Option<i64>> {
         let ord = self.ord_of(rowid)?;
         let (rid, ordc) = (self.q_rid(), self.q_ord());
-        let mut stmt = self
-            .db
-            .prepare(&format!("SELECT {rid} FROM dados WHERE {ordc} > ?1 ORDER BY {ordc}"))?;
+        let mut stmt = self.db.prepare(&format!(
+            "SELECT {rid} FROM dados WHERE {ordc} > ?1 ORDER BY {ordc}"
+        ))?;
         let mut q = stmt.query([ord])?;
         while let Some(r) = q.next()? {
             let id: i64 = r.get(0)?;
@@ -1172,7 +1300,11 @@ impl XmlDoc {
         out.push_str(&self.params_xml);
         out.push_str("</METADATA><ROWDATA>");
 
-        let cols = names.iter().map(|n| quote_ident(n)).collect::<Vec<_>>().join(", ");
+        let cols = names
+            .iter()
+            .map(|n| quote_ident(n))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!("SELECT {cols} FROM dados ORDER BY {}", self.q_ord());
         let mut stmt = self.db.prepare(&sql)?;
         let mut q = stmt.query([])?;
@@ -1257,7 +1389,11 @@ fn ensure_select_only(sql: &str) -> Result<()> {
     let mut s = sql.trim_start();
     loop {
         if let Some(rest) = s.strip_prefix("--") {
-            s = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("").trim_start();
+            s = rest
+                .find('\n')
+                .map(|i| &rest[i + 1..])
+                .unwrap_or("")
+                .trim_start();
         } else if let Some(rest) = s.strip_prefix("/*") {
             let Some(i) = rest.find("*/") else {
                 bail!("comentário SQL não terminado");
@@ -1313,8 +1449,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     ));
 
     let write = || -> Result<()> {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("gravando {}", tmp.display()))?;
+        let mut f =
+            std::fs::File::create(&tmp).with_context(|| format!("gravando {}", tmp.display()))?;
         f.write_all(bytes)?;
         f.sync_all()?;
         Ok(())
@@ -1336,8 +1472,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::from(e))
-            .with_context(|| format!("gravando {}", path.display()));
+        return Err(anyhow::Error::from(e)).with_context(|| format!("gravando {}", path.display()));
     }
     Ok(())
 }
@@ -1542,7 +1677,11 @@ pub fn parse_number(s: &str) -> Option<f64> {
         return Some(n);
     }
     // formato BR: remove pontos de milhar, troca vírgula por ponto
-    let br: String = t.chars().filter(|c| *c != '.').collect::<String>().replace(',', ".");
+    let br: String = t
+        .chars()
+        .filter(|c| *c != '.')
+        .collect::<String>()
+        .replace(',', ".");
     br.parse::<f64>().ok()
 }
 
@@ -1647,7 +1786,11 @@ mod tests {
             passos += 1;
         }
         assert_eq!(passos, 8);
-        assert_eq!(saved(&dp), original, "desfazer tudo volta ao arquivo original");
+        assert_eq!(
+            saved(&dp),
+            original,
+            "desfazer tudo volta ao arquivo original"
+        );
         assert!(!dp.can_undo());
 
         while dp.redo().unwrap().is_some() {}
@@ -1676,7 +1819,10 @@ mod tests {
         // a próxima linha visível depois da 1, com a 2 fora do filtro, é a 3
         assert_eq!(dp.next_row_where(r1, |id| id != r2).unwrap(), Some(r3));
         assert_eq!(dp.next_row_where(r3, |_| true).unwrap(), None);
-        assert_eq!(dp.visible_row(r2, "").unwrap().unwrap(), ["2", "Beta", "4.25"]);
+        assert_eq!(
+            dp.visible_row(r2, "").unwrap().unwrap(),
+            ["2", "Beta", "4.25"]
+        );
         assert!(dp.visible_row(r2, "nome = 'Alpha'").unwrap().is_none());
         let _ = std::fs::remove_file(&p);
     }
@@ -1712,15 +1858,28 @@ mod tests {
         let original = saved(&dp);
         let r1 = rid_of(&dp, "1");
         let rows = vec![
-            vec![("id".to_string(), "9".to_string()), ("extra".to_string(), "x".to_string())],
+            vec![
+                ("id".to_string(), "9".to_string()),
+                ("extra".to_string(), "x".to_string()),
+            ],
             vec![("nome".to_string(), "Zeta".to_string())],
         ];
         let (created, ignored) = dp.insert_rows(Some(r1), false, &rows).unwrap();
         assert_eq!(created.len(), 2);
         assert_eq!(created[0].1, ["9", "", ""]);
         assert_eq!(ignored, ["extra"]);
-        let ids: Vec<String> = dp.filter(None).unwrap().rows.iter().map(|r| r[1].clone()).collect();
-        assert_eq!(ids, ["1", "9", "", "2", "3"], "coladas logo abaixo da linha 1, na ordem");
+        let ids: Vec<String> = dp
+            .filter(None)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r[1].clone())
+            .collect();
+        assert_eq!(
+            ids,
+            ["1", "9", "", "2", "3"],
+            "coladas logo abaixo da linha 1, na ordem"
+        );
 
         match dp.undo().unwrap() {
             Some(Change::Batch(c)) => assert_eq!(c.len(), 2),
@@ -1803,14 +1962,20 @@ mod tests {
         let dp = XmlDoc::open(&p).unwrap();
         let antes = dp.filter(None).unwrap();
         let hist_antes = hist_of(&antes);
-        assert!(hist_antes.contains('\n'), "parser deveria ter LF: {hist_antes:?}");
+        assert!(
+            hist_antes.contains('\n'),
+            "parser deveria ter LF: {hist_antes:?}"
+        );
 
         let tmp = tmp_path("lexml_ctrl_out.xml");
         dp.save(&tmp).unwrap();
         let dp2 = XmlDoc::open(&tmp).unwrap();
         let depois = dp2.filter(None).unwrap();
         let hist_depois = hist_of(&depois);
-        assert_eq!(hist_antes, hist_depois, "quebras de linha perdidas no round-trip");
+        assert_eq!(
+            hist_antes, hist_depois,
+            "quebras de linha perdidas no round-trip"
+        );
     }
 
     /// A tag <DATAPACKET> (Version) e a seção <PARAMS> com conteúdo devem
@@ -1835,7 +2000,10 @@ mod tests {
         dp.save(&tmp).unwrap();
         let out = std::fs::read_to_string(&tmp).unwrap();
 
-        assert!(out.contains("<DATAPACKET Version=\"3.1\">"), "Version perdida: {out}");
+        assert!(
+            out.contains("<DATAPACKET Version=\"3.1\">"),
+            "Version perdida: {out}"
+        );
         assert!(
             out.contains("<PARAMS><PARAM Name=\"LCID\" fieldtype=\"i4\" VALUE=\"1046\"/></PARAMS>"),
             "PARAMS perdido: {out}"
@@ -1865,7 +2033,10 @@ mod tests {
     #[test]
     fn quote_ident_escapa_aspas() {
         assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
-        assert_eq!(quote_ident("x\" FROM dados; --"), "\"x\"\" FROM dados; --\"");
+        assert_eq!(
+            quote_ident("x\" FROM dados; --"),
+            "\"x\"\" FROM dados; --\""
+        );
     }
 
     /// Coleta a coluna `col` em ordem de exibição (__ord).
@@ -1959,7 +2130,9 @@ mod tests {
         // leitura legítima continua funcionando
         let r = dp.query("SELECT nome FROM dados ORDER BY nome").unwrap();
         assert_eq!(r.rows.len(), 3);
-        assert!(dp.query("WITH x AS (SELECT 1 AS a) SELECT a FROM x").is_ok());
+        assert!(dp
+            .query("WITH x AS (SELECT 1 AS a) SELECT a FROM x")
+            .is_ok());
 
         // e as edições normais da tabela não ficaram bloqueadas pelo query_only
         let rid = dp.add_row().unwrap();
@@ -1971,7 +2144,13 @@ mod tests {
     /// produzindo `<ROW a" evil="1="X"/>` — XML quebrado/injetado.
     #[test]
     fn campo_com_nome_invalido_e_recusado() {
-        for apelido in ["a&quot; evil=&quot;1", "a/><ROW b=", "com espaço", "1digito", ""] {
+        for apelido in [
+            "a&quot; evil=&quot;1",
+            "a/><ROW b=",
+            "com espaço",
+            "1digito",
+            "",
+        ] {
             let xml = format!(
                 "<DATAPACKET Version=\"2.0\"><METADATA><FIELDS>\
                  <FIELD attrname=\"{apelido}\" fieldtype=\"string\" WIDTH=\"10\"/>\
@@ -2001,7 +2180,10 @@ mod tests {
         let out = tmp_path("lexml_reg_nomes.xml");
         dp.save(&out).unwrap();
         let dp2 = XmlDoc::open(&out).unwrap();
-        assert_eq!(dp2.field_names(), vec!["id", "nome.completo", "valor", "novo-campo"]);
+        assert_eq!(
+            dp2.field_names(),
+            vec!["id", "nome.completo", "valor", "novo-campo"]
+        );
     }
 
     /// `<PARAMS>` dentro de um comentário não é a seção real; antes, era ela
@@ -2065,7 +2247,10 @@ mod tests {
             // a coluna do arquivo aparece; nenhuma coluna de controle vaza
             let res = dp.filter(None).unwrap();
             assert_eq!(res.columns[0], dp.rid_alias());
-            assert_eq!(&res.columns[1..], &[nome.to_string(), "nome".to_string()][..]);
+            assert_eq!(
+                &res.columns[1..],
+                &[nome.to_string(), "nome".to_string()][..]
+            );
 
             // o rowid devolvido ainda serve para editar a linha certa
             let rid: i64 = res.rows[0][0].parse().unwrap();
@@ -2077,7 +2262,10 @@ mod tests {
             // e o round-trip preserva o campo
             let out = tmp_path(format!("lexml_reg_int_{nome}_out.xml"));
             dp.save(&out).unwrap();
-            assert_eq!(XmlDoc::open(&out).unwrap().field_names(), vec![nome, "nome"]);
+            assert_eq!(
+                XmlDoc::open(&out).unwrap().field_names(),
+                vec![nome, "nome"]
+            );
         }
     }
 
@@ -2098,7 +2286,10 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
             .filter(|n| n != "saida.xml")
             .collect();
-        assert!(restos.is_empty(), "temporários deixados para trás: {restos:?}");
+        assert!(
+            restos.is_empty(),
+            "temporários deixados para trás: {restos:?}"
+        );
         assert_eq!(XmlDoc::open(&alvo).unwrap().row_count(), 3);
 
         // um destino impossível falha sem apagar o que já existia
@@ -2119,6 +2310,4 @@ mod tests {
         let dp2 = XmlDoc::open(&out).unwrap();
         assert_eq!(dp2.filter(None).unwrap().rows[0][2], bruto);
     }
-
-
 }

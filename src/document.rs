@@ -1,12 +1,12 @@
-use crate::xmldoc::{Change, XmlDoc, QueryResult};
-use crate::row_object::RowObject;
 use crate::dialog;
+use crate::i18n::tr;
 use crate::replace::Matcher;
+use crate::row_object::RowObject;
 use crate::rowclip;
 use crate::sort::{cmp_keys, sort_key, SortKey};
-use crate::i18n::tr;
-use gtk::prelude::*;
+use crate::xmldoc::{Change, QueryResult, XmlDoc};
 use gtk::glib::{self, clone};
+use gtk::prelude::*;
 use gtk::{gdk, gio};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ struct State {
     dirty: RefCell<bool>,
     path: PathBuf,
     saved_path: RefCell<Option<PathBuf>>, // caminho em disco já conhecido (Salvar sobrescreve)
-    last_filter: RefCell<String>, // último WHERE aplicado (para recarregar)
+    last_filter: RefCell<String>,         // último WHERE aplicado (para recarregar)
     // Geração da carga atual: cada recarga (abertura, filtro, SQL, reload)
     // incrementa este contador; um carregador em blocos em andamento verifica-o
     // e para assim que fica obsoleto (cancelamento de carga antiga).
@@ -68,7 +68,8 @@ pub struct DocumentView {
     cur_widget: RefCell<Option<gtk::Widget>>,
     // Widget de cada célula → seu ListItem, para achar a linha sob o
     // ponteiro ao arrastar a seleção.
-    cell_items: RefCell<std::collections::HashMap<gtk::Widget, (glib::WeakRef<gtk::ListItem>, usize)>>,
+    cell_items:
+        RefCell<std::collections::HashMap<gtk::Widget, (glib::WeakRef<gtk::ListItem>, usize)>>,
     // Seleção de células (retângulos de linhas × colunas), para limpar o
     // conteúdo com Backspace. Copiar/colar continuam agindo sobre linhas.
     cell_rects: RefCell<Vec<CellRect>>,
@@ -135,7 +136,11 @@ impl DocumentView {
             dirty: RefCell::new(false),
             // Arquivos abertos do disco vêm com caminho absoluto; um documento
             // novo ("novo.xml") vem com caminho relativo e ainda não tem destino.
-            saved_path: RefCell::new(if path.is_absolute() { Some(path.clone()) } else { None }),
+            saved_path: RefCell::new(if path.is_absolute() {
+                Some(path.clone())
+            } else {
+                None
+            }),
             path,
             last_filter: RefCell::new(String::new()),
             generation: Cell::new(0),
@@ -292,11 +297,17 @@ impl DocumentView {
         let busy_label = gtk::Label::new(None);
         busy_label.add_css_class("heading");
         card.append(&busy_label);
-        let busy_bar = gtk::ProgressBar::builder().show_text(true).width_request(280).build();
+        let busy_bar = gtk::ProgressBar::builder()
+            .show_text(true)
+            .width_request(280)
+            .build();
         card.append(&busy_bar);
         busy_shade.append(&card);
 
-        let overlay = gtk::Overlay::builder().vexpand(true).child(&scroller).build();
+        let overlay = gtk::Overlay::builder()
+            .vexpand(true)
+            .child(&scroller)
+            .build();
         overlay.add_overlay(&busy_shade);
         root.append(&overlay);
 
@@ -334,14 +345,26 @@ impl DocumentView {
         rows_menu.append_section(None, &sec_insert);
         let sec_clone = gio::Menu::new();
         sec_clone.append(Some(tr("ctx_row_clone_above")), Some("doc.row-clone-above"));
-        sec_clone.append_item(&menu_item("ctx_row_clone_below", "doc.row-clone-below", "row_clone"));
+        sec_clone.append_item(&menu_item(
+            "ctx_row_clone_below",
+            "doc.row-clone-below",
+            "row_clone",
+        ));
         rows_menu.append_section(None, &sec_clone);
         let sec_move = gio::Menu::new();
         sec_move.append_item(&menu_item("ctx_row_move_up", "doc.row-move-up", "move_up"));
-        sec_move.append_item(&menu_item("ctx_row_move_down", "doc.row-move-down", "move_down"));
+        sec_move.append_item(&menu_item(
+            "ctx_row_move_down",
+            "doc.row-move-down",
+            "move_down",
+        ));
         rows_menu.append_section(None, &sec_move);
         let sec_row_del = gio::Menu::new();
-        sec_row_del.append_item(&menu_item("ctx_row_delete", "doc.row-delete", "delete_rows"));
+        sec_row_del.append_item(&menu_item(
+            "ctx_row_delete",
+            "doc.row-delete",
+            "delete_rows",
+        ));
         rows_menu.append_section(None, &sec_row_del);
         menu_model.append_submenu(Some(tr("ctx_row_menu")), &rows_menu);
 
@@ -355,7 +378,11 @@ impl DocumentView {
 
         // Atalho em destaque, fora dos submenus: Somar coluna.
         let sec_quick = gio::Menu::new();
-        sec_quick.append_item(&menu_item("ctx_cells_clear", "doc.cells-clear", "clear_cells"));
+        sec_quick.append_item(&menu_item(
+            "ctx_cells_clear",
+            "doc.cells-clear",
+            "clear_cells",
+        ));
         sec_quick.append(Some(tr("ctx_col_sum")), Some("doc.col-sum"));
         menu_model.append_section(None, &sec_quick);
 
@@ -440,21 +467,66 @@ impl DocumentView {
             a.connect_activate(move |_, _| f());
             a
         };
-        actions.add_action(&mk("row-above", Box::new(clone!(@strong me => move || me.ctx_insert_row(true)))));
-        actions.add_action(&mk("row-below", Box::new(clone!(@strong me => move || me.ctx_insert_row(false)))));
-        actions.add_action(&mk("cells-clear", Box::new(clone!(@strong me => move || me.clear_selected_cells()))));
-        actions.add_action(&mk("row-copy", Box::new(clone!(@strong me => move || { me.copy_rows(); }))));
-        actions.add_action(&mk("paste-above", Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), true)))));
-        actions.add_action(&mk("paste-below", Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), false)))));
-        actions.add_action(&mk("row-delete", Box::new(clone!(@strong me => move || me.ctx_delete_row()))));
-        actions.add_action(&mk("row-clone-above", Box::new(clone!(@strong me => move || me.ctx_clone_row(true)))));
-        actions.add_action(&mk("row-clone-below", Box::new(clone!(@strong me => move || me.ctx_clone_row(false)))));
-        actions.add_action(&mk("row-move-up", Box::new(clone!(@strong me => move || me.ctx_move_row(true)))));
-        actions.add_action(&mk("row-move-down", Box::new(clone!(@strong me => move || me.ctx_move_row(false)))));
-        actions.add_action(&mk("col-sum", Box::new(clone!(@strong me => move || me.ctx_sum_column()))));
-        actions.add_action(&mk("col-rename", Box::new(clone!(@strong me => move || me.ctx_rename_column()))));
-        actions.add_action(&mk("col-add", Box::new(clone!(@strong me => move || me.ctx_add_column()))));
-        actions.add_action(&mk("col-delete", Box::new(clone!(@strong me => move || me.ctx_delete_column()))));
+        actions.add_action(&mk(
+            "row-above",
+            Box::new(clone!(@strong me => move || me.ctx_insert_row(true))),
+        ));
+        actions.add_action(&mk(
+            "row-below",
+            Box::new(clone!(@strong me => move || me.ctx_insert_row(false))),
+        ));
+        actions.add_action(&mk(
+            "cells-clear",
+            Box::new(clone!(@strong me => move || me.clear_selected_cells())),
+        ));
+        actions.add_action(&mk(
+            "row-copy",
+            Box::new(clone!(@strong me => move || { me.copy_rows(); })),
+        ));
+        actions.add_action(&mk(
+            "paste-above",
+            Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), true))),
+        ));
+        actions.add_action(&mk(
+            "paste-below",
+            Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), false))),
+        ));
+        actions.add_action(&mk(
+            "row-delete",
+            Box::new(clone!(@strong me => move || me.ctx_delete_row())),
+        ));
+        actions.add_action(&mk(
+            "row-clone-above",
+            Box::new(clone!(@strong me => move || me.ctx_clone_row(true))),
+        ));
+        actions.add_action(&mk(
+            "row-clone-below",
+            Box::new(clone!(@strong me => move || me.ctx_clone_row(false))),
+        ));
+        actions.add_action(&mk(
+            "row-move-up",
+            Box::new(clone!(@strong me => move || me.ctx_move_row(true))),
+        ));
+        actions.add_action(&mk(
+            "row-move-down",
+            Box::new(clone!(@strong me => move || me.ctx_move_row(false))),
+        ));
+        actions.add_action(&mk(
+            "col-sum",
+            Box::new(clone!(@strong me => move || me.ctx_sum_column())),
+        ));
+        actions.add_action(&mk(
+            "col-rename",
+            Box::new(clone!(@strong me => move || me.ctx_rename_column())),
+        ));
+        actions.add_action(&mk(
+            "col-add",
+            Box::new(clone!(@strong me => move || me.ctx_add_column())),
+        ));
+        actions.add_action(&mk(
+            "col-delete",
+            Box::new(clone!(@strong me => move || me.ctx_delete_column())),
+        ));
         me.root.insert_action_group("doc", Some(&actions));
 
         // ---------- conexões ----------
@@ -476,7 +548,9 @@ impl DocumentView {
             // desfazer no meio dela deixaria o documento pela metade.
             // Esc fecha o menu de contexto (sem autohide ele não fecha sozinho
             // quando o foco do teclado continua na tabela).
-            if keyval == gdk::Key::Escape && (me_keys.menu.is_visible() || me_keys.header_menu.is_visible()) {
+            if keyval == gdk::Key::Escape
+                && (me_keys.menu.is_visible() || me_keys.header_menu.is_visible())
+            {
                 close_menu(me_keys.menu.upcast_ref());
                 close_menu(me_keys.header_menu.upcast_ref());
                 return glib::Propagation::Stop;
@@ -490,7 +564,9 @@ impl DocumentView {
             // que tem seu próprio copiar, desfazer, apagar.
             if let Some(action) = crate::shortcuts::find(keyval, state) {
                 let plain = !state.intersects(
-                    gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK,
+                    gdk::ModifierType::CONTROL_MASK
+                        | gdk::ModifierType::ALT_MASK
+                        | gdk::ModifierType::SUPER_MASK,
                 );
                 if (action.grid || plain) && me_keys.text_has_focus() {
                     return glib::Propagation::Proceed;
@@ -512,7 +588,8 @@ impl DocumentView {
                 me.focus_replace_bar();
             }
         }));
-        replace_close.connect_clicked(clone!(@strong me => move |_| me.replace_toggle.set_active(false)));
+        replace_close
+            .connect_clicked(clone!(@strong me => move |_| me.replace_toggle.set_active(false)));
         replace_btn.connect_clicked(clone!(@strong me => move |_| me.replace_one()));
         replace_all_btn.connect_clicked(clone!(@strong me => move |_| me.replace_all()));
         replace_entry.connect_activate(clone!(@strong me => move |_| me.replace_one()));
@@ -615,7 +692,7 @@ impl DocumentView {
         listbox.add_css_class("filter-suggestions");
 
         let popover = gtk::Popover::builder()
-            .autohide(false)          // mantém o foco no campo de texto
+            .autohide(false) // mantém o foco no campo de texto
             .has_arrow(false)
             .position(gtk::PositionType::Bottom)
             .halign(gtk::Align::Start)
@@ -639,7 +716,10 @@ impl DocumentView {
                 let cursor = entry.position().max(0) as usize;
                 let (start, _end, word) = current_word(&text, cursor);
                 // só sugere ao digitar o começo de uma palavra (não no meio)
-                let typed = word.chars().take(cursor.saturating_sub(start)).collect::<String>();
+                let typed = word
+                    .chars()
+                    .take(cursor.saturating_sub(start))
+                    .collect::<String>();
                 if typed.trim().is_empty() {
                     popover.popdown();
                     return false;
@@ -828,7 +908,10 @@ impl DocumentView {
         // linha) para liberar memória progressivamente sem custo quadrático.
         let mut rows = res.rows;
         let sort_col = self.state.sort.borrow().as_ref().and_then(|(name, asc)| {
-            vis_names.iter().position(|n| n == name).map(|p| (vis_idx[p], *asc))
+            vis_names
+                .iter()
+                .position(|n| n == name)
+                .map(|p| (vis_idx[p], *asc))
         });
         if let Some((ci, asc)) = sort_col {
             let mut keyed: Vec<(SortKey, Vec<String>)> =
@@ -856,8 +939,10 @@ impl DocumentView {
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(-1);
                 // move os valores visíveis para fora da linha (sem clonar o heap)
-                let values: Vec<String> =
-                    vis_idx.iter().map(|&i| std::mem::take(&mut row[i])).collect();
+                let values: Vec<String> = vis_idx
+                    .iter()
+                    .map(|&i| std::mem::take(&mut row[i]))
+                    .collect();
                 chunk.push(RowObject::new(rowid, values, editable));
             }
             if !chunk.is_empty() {
@@ -881,7 +966,9 @@ impl DocumentView {
     /// permaneça em memória mesmo que o shell da view seja mantido vivo por
     /// algum handler — evitando o acúmulo que levava ao OOM/"AppRun.wrapped".
     pub fn teardown(&self) {
-        self.state.generation.set(self.state.generation.get().wrapping_add(1));
+        self.state
+            .generation
+            .set(self.state.generation.get().wrapping_add(1));
         self.state.loading.set(false);
         self.store.remove_all();
         let cols = self.colview.columns();
@@ -915,7 +1002,7 @@ impl DocumentView {
             factory.connect_setup(move |_, list_item| {
                 let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
                 list_item.set_focusable(false); // O foco vai direto para a célula
-                
+
                 let label = gtk::EditableLabel::new("");
                 label.set_margin_start(4);
                 label.set_margin_end(4);
@@ -931,7 +1018,11 @@ impl DocumentView {
                     let Some(me_key) = me_key.upgrade() else {
                         return glib::Propagation::Proceed;
                     };
-                    let lbl = ctrl.widget().unwrap().downcast::<gtk::EditableLabel>().unwrap();
+                    let lbl = ctrl
+                        .widget()
+                        .unwrap()
+                        .downcast::<gtk::EditableLabel>()
+                        .unwrap();
                     if lbl.is_editing() {
                         // Tab/Shift+Tab: commita e move o foco manualmente. Sem isso,
                         // o EditableLabel devolve o foco a si mesmo ao parar de editar,
@@ -965,9 +1056,7 @@ impl DocumentView {
                             let pos = li_key.position();
                             if keyval == gdk::Key::Up && pos > 0 {
                                 me_key.select_only(pos - 1);
-                            } else if keyval == gdk::Key::Down
-                                && pos + 1 < me_key.store.n_items()
-                            {
+                            } else if keyval == gdk::Key::Down && pos + 1 < me_key.store.n_items() {
                                 me_key.select_only(pos + 1);
                             }
                             return glib::Propagation::Stop;
@@ -978,8 +1067,16 @@ impl DocumentView {
                     let shift = _state.contains(gdk::ModifierType::SHIFT_MASK);
                     if shift && matches!(keyval, gdk::Key::Left | gdk::Key::Right) {
                         let ncol = me_key.state.columns.borrow().len();
-                        let cur = me_key.cur_cell.borrow().as_ref().map_or(col_idx, |(_, c)| *c);
-                        let to = if keyval == gdk::Key::Left { cur.saturating_sub(1) } else { (cur + 1).min(ncol.saturating_sub(1)) };
+                        let cur = me_key
+                            .cur_cell
+                            .borrow()
+                            .as_ref()
+                            .map_or(col_idx, |(_, c)| *c);
+                        let to = if keyval == gdk::Key::Left {
+                            cur.saturating_sub(1)
+                        } else {
+                            (cur + 1).min(ncol.saturating_sub(1))
+                        };
                         let pos = li_key.position();
                         if let Some(w) = me_key.cell_widget(pos, to) {
                             w.grab_focus();
@@ -998,7 +1095,7 @@ impl DocumentView {
                         if let Some(root) = lbl.root() {
                             let w = root.upcast::<gtk::Widget>();
                             w.child_focus(d);
-                            
+
                             // Sincroniza o destaque da linha com o novo foco da
                             // célula; com Shift, estende a seleção a partir da âncora.
                             let pos = li_key.position();
@@ -1035,8 +1132,9 @@ impl DocumentView {
                     // inicia a edição já substituindo o conteúdo pelo que foi digitado,
                     // sem exigir Enter. Ignora se houver Ctrl/Alt (atalhos).
                     if lbl.is_editable()
-                        && !_state.intersects(gdk::ModifierType::CONTROL_MASK
-                            | gdk::ModifierType::ALT_MASK)
+                        && !_state.intersects(
+                            gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK,
+                        )
                     {
                         if let Some(ch) = keyval.to_unicode() {
                             if !ch.is_control() {
@@ -1057,7 +1155,9 @@ impl DocumentView {
                 let focus = gtk::EventControllerFocus::new();
                 focus.connect_enter(move |f| {
                     let Some(me) = me_focus.upgrade() else { return };
-                    let Some(row) = li_focus.item().and_downcast::<RowObject>() else { return };
+                    let Some(row) = li_focus.item().and_downcast::<RowObject>() else {
+                        return;
+                    };
                     me.set_current_cell(&f.widget().unwrap(), row, col_idx);
                 });
                 label.add_controller(focus);
@@ -1077,7 +1177,9 @@ impl DocumentView {
                 // EditableLabel, evitando que apareça o menu padrão (copiar/colar).
                 gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
                 gesture.connect_pressed(move |g, _, x, y| {
-                    let Some(me_ctx) = me_ctx.upgrade() else { return };
+                    let Some(me_ctx) = me_ctx.upgrade() else {
+                        return;
+                    };
                     g.set_state(gtk::EventSequenceState::Claimed);
                     if let Some(item) = li_ctx.item() {
                         if let Ok(row) = item.downcast::<RowObject>() {
@@ -1095,7 +1197,11 @@ impl DocumentView {
                             me_ctx.select_only(pos);
                         }
                         // idem para as células: fora da seleção, só a clicada
-                        let in_cells = me_ctx.cell_rects.borrow().iter().any(|r| r.contains(pos, col_idx));
+                        let in_cells = me_ctx
+                            .cell_rects
+                            .borrow()
+                            .iter()
+                            .any(|r| r.contains(pos, col_idx));
                         if !in_cells {
                             me_ctx.select_single_cell(pos, col_idx);
                         }
@@ -1129,8 +1235,14 @@ impl DocumentView {
                 sel_gesture.set_button(gdk::BUTTON_PRIMARY);
                 sel_gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
                 sel_gesture.connect_pressed(move |g, _n, _x, _y| {
-                    let Some(me_sel) = me_sel.upgrade() else { return };
-                    let lbl = g.widget().unwrap().downcast::<gtk::EditableLabel>().unwrap();
+                    let Some(me_sel) = me_sel.upgrade() else {
+                        return;
+                    };
+                    let lbl = g
+                        .widget()
+                        .unwrap()
+                        .downcast::<gtk::EditableLabel>()
+                        .unwrap();
                     if lbl.is_editing() {
                         return; // já editando: não interfere
                     }
@@ -1296,7 +1408,9 @@ impl DocumentView {
         if self.state.loading.get() {
             return;
         }
-        let Some(name) = self.state.columns.borrow().get(col).cloned() else { return };
+        let Some(name) = self.state.columns.borrow().get(col).cloned() else {
+            return;
+        };
         let next = match self.state.sort.borrow().clone() {
             Some((n, true)) if n == name => Some((name, false)),
             Some((n, false)) if n == name => None,
@@ -1320,7 +1434,9 @@ impl DocumentView {
                 Some((n, asc)) if n == name => format!("{name} {}", if *asc { "▲" } else { "▼" }),
                 _ => name.clone(),
             };
-            obj.downcast::<gtk::ColumnViewColumn>().unwrap().set_title(Some(&title));
+            obj.downcast::<gtk::ColumnViewColumn>()
+                .unwrap()
+                .set_title(Some(&title));
         }
     }
 
@@ -1334,15 +1450,22 @@ impl DocumentView {
             .collect();
         let editable = *self.state.editable.borrow();
         let spec = self.state.sort.borrow().as_ref().and_then(|(name, asc)| {
-            self.state.columns.borrow().iter().position(|c| c == name).map(|c| (c, *asc))
+            self.state
+                .columns
+                .borrow()
+                .iter()
+                .position(|c| c == name)
+                .map(|c| (c, *asc))
         });
         let sorted: Vec<RowObject> = match spec {
             Some((col, asc)) => {
                 if !editable && self.state.unsorted.borrow().is_none() {
                     *self.state.unsorted.borrow_mut() = Some(rows.clone());
                 }
-                let mut keyed: Vec<(SortKey, RowObject)> =
-                    rows.into_iter().map(|r| (sort_key(&r.value(col)), r)).collect();
+                let mut keyed: Vec<(SortKey, RowObject)> = rows
+                    .into_iter()
+                    .map(|r| (sort_key(&r.value(col)), r))
+                    .collect();
                 keyed.sort_by(|a, b| cmp_keys(&a.0, &b.0, asc));
                 keyed.into_iter().map(|(_, r)| r).collect()
             }
@@ -1389,7 +1512,10 @@ impl DocumentView {
             match me.state.dp.rename_column(&old, &new) {
                 Ok(()) => {
                     me.mark_dirty();
-                    me.show_change(Change::ColumnRenamed { from: old.clone(), to: new.trim().to_string() });
+                    me.show_change(Change::ColumnRenamed {
+                        from: old.clone(),
+                        to: new.trim().to_string(),
+                    });
                 }
                 Err(err) => me.error(&format!("{}\n{err}", tr("column_op_error"))),
             }
@@ -1401,7 +1527,11 @@ impl DocumentView {
 
     /// Critério atual de Localizar, com as opções da barra de Substituir.
     fn matcher(&self, needle: &str) -> Matcher {
-        Matcher::new(needle, self.case_chk.is_active(), self.whole_chk.is_active())
+        Matcher::new(
+            needle,
+            self.case_chk.is_active(),
+            self.whole_chk.is_active(),
+        )
     }
 
     /// Colunas onde procurar: todas, ou só a escolhida na barra de Substituir.
@@ -1412,7 +1542,10 @@ impl DocumentView {
             i => {
                 let name = self.scope_list.string(i).map(|s| s.to_string());
                 let cols = self.state.columns.borrow();
-                cols.iter().position(|c| Some(c) == name.as_ref()).into_iter().collect()
+                cols.iter()
+                    .position(|c| Some(c) == name.as_ref())
+                    .into_iter()
+                    .collect()
             }
         }
     }
@@ -1426,7 +1559,8 @@ impl DocumentView {
         };
         let cols = self.state.columns.borrow().clone();
         let names: Vec<&str> = cols.iter().map(|c| c.as_str()).collect();
-        self.scope_list.splice(1, self.scope_list.n_items().saturating_sub(1), &names);
+        self.scope_list
+            .splice(1, self.scope_list.n_items().saturating_sub(1), &names);
         let sel = chosen
             .and_then(|c| cols.iter().position(|n| *n == c))
             .map_or(0, |p| p as u32 + 1);
@@ -1434,7 +1568,8 @@ impl DocumentView {
     }
 
     fn toggle_replace_bar(&self) {
-        self.replace_toggle.set_active(!self.replace_toggle.is_active());
+        self.replace_toggle
+            .set_active(!self.replace_toggle.is_active());
     }
 
     /// Ao abrir a barra: foca Localizar se está vazio, senão Substituir por.
@@ -1457,7 +1592,11 @@ impl DocumentView {
         }
         let cols = self.scope_cols();
         let start = self.cursor_pos();
-        let start = if start == gtk::INVALID_LIST_POSITION { 0 } else { start + 1 };
+        let start = if start == gtk::INVALID_LIST_POSITION {
+            0
+        } else {
+            start + 1
+        };
         for off in 0..n {
             let pos = (start + off) % n;
             if let Some(obj) = self.store.item(pos) {
@@ -1475,7 +1614,13 @@ impl DocumentView {
 
     /// Substituições de uma linha: (coluna, valor novo) de cada célula do
     /// escopo que casa com `m`.
-    fn row_replacements(&self, row: &RowObject, m: &Matcher, with: &str, cols: &[usize]) -> Vec<(usize, String)> {
+    fn row_replacements(
+        &self,
+        row: &RowObject,
+        m: &Matcher,
+        with: &str,
+        cols: &[usize],
+    ) -> Vec<(usize, String)> {
         cols.iter()
             .filter_map(|&c| m.replace(&row.value(c), with).map(|v| (c, v)))
             .collect()
@@ -1557,7 +1702,8 @@ impl DocumentView {
                     let reps = me.row_replacements(&row, &m, &with, &cols);
                     if !reps.is_empty() {
                         edits.extend(
-                            reps.iter().map(|(c, v)| (row.rowid(), names[*c].clone(), v.clone())),
+                            reps.iter()
+                                .map(|(c, v)| (row.rowid(), names[*c].clone(), v.clone())),
                         );
                         changed.push((pos, row, reps));
                     }
@@ -1619,7 +1765,9 @@ impl DocumentView {
             })
             .collect();
         for (w, row, col) in cells {
-            let Ok(label) = w.downcast::<gtk::EditableLabel>() else { continue };
+            let Ok(label) = w.downcast::<gtk::EditableLabel>() else {
+                continue;
+            };
             let v = row.value(col);
             if !label.is_editing() && label.text() != v {
                 label.set_text(&v);
@@ -1639,7 +1787,11 @@ impl DocumentView {
     }
 
     fn set_busy_progress(&self, done: u32, total: u32) {
-        let frac = if total == 0 { 1.0 } else { done as f64 / total as f64 };
+        let frac = if total == 0 {
+            1.0
+        } else {
+            done as f64 / total as f64
+        };
         self.busy_bar.set_fraction(frac);
         self.busy_bar
             .set_text(Some(&format!("{done} {} {total} {}", tr("of"), tr("rows"))));
@@ -1663,7 +1815,8 @@ impl DocumentView {
         let edits: Vec<(i64, String, String)> = changed
             .iter()
             .flat_map(|(_, row, reps)| {
-                reps.iter().map(|(c, v)| (row.rowid(), names[*c].clone(), v.clone()))
+                reps.iter()
+                    .map(|(c, v)| (row.rowid(), names[*c].clone(), v.clone()))
             })
             .collect();
         match self.state.dp.update_cells(&edits) {
@@ -1699,7 +1852,9 @@ impl DocumentView {
             tr("sum"),
             move || {
                 let sel = dropdown2.selected();
-                let Some(col) = names.get(sel as usize).cloned() else { return };
+                let Some(col) = names.get(sel as usize).cloned() else {
+                    return;
+                };
                 let filter = me.state.last_filter.borrow().clone();
                 match me.state.dp.sum_column(&col, Some(&filter)) {
                     Ok((total, count)) => {
@@ -1857,7 +2012,9 @@ impl DocumentView {
     }
 
     fn window(&self) -> Option<gtk::Window> {
-        self.root.root().and_then(|r| r.downcast::<gtk::Window>().ok())
+        self.root
+            .root()
+            .and_then(|r| r.downcast::<gtk::Window>().ok())
     }
 
     /// Confirma a edição de célula em andamento (se houver) antes de salvar.
@@ -1865,7 +2022,9 @@ impl DocumentView {
     /// ocorre quando o EditableLabel perde o foco.
     fn commit_pending_edit(&self) {
         let Some(win) = self.window() else { return };
-        let Some(focus) = GtkWindowExt::focus(&win) else { return };
+        let Some(focus) = GtkWindowExt::focus(&win) else {
+            return;
+        };
         let mut w = Some(focus);
         while let Some(cur) = w {
             if let Ok(lbl) = cur.clone().downcast::<gtk::EditableLabel>() {
@@ -1899,7 +2058,9 @@ impl DocumentView {
         {
             return;
         }
-        let Ok(xml) = self.state.dp.to_xml() else { return };
+        let Ok(xml) = self.state.dp.to_xml() else {
+            return;
+        };
         let (data, meta) = self.recovery.paths();
         let original = self.state.saved_path.borrow().clone();
         let name = original
@@ -1918,7 +2079,11 @@ impl DocumentView {
         self.backup_writing.set(true);
         let handle = gio::spawn_blocking(move || {
             if let Some(path) = &snapshot {
-                let _ = crate::backup::save_snapshot(path, xml.as_bytes(), crate::backup::Kind::Editing);
+                let _ = crate::backup::save_snapshot(
+                    path,
+                    xml.as_bytes(),
+                    crate::backup::Kind::Editing,
+                );
             }
             crate::backup::Recovery::write(&data, &meta, xml.as_bytes(), original.as_deref(), &name)
                 .is_ok()
@@ -1982,8 +2147,13 @@ impl DocumentView {
                 return;
             }
         };
-        let current = crate::diff::Table { names: self.state.dp.field_names(), rows };
-        let name = path.file_name().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        let current = crate::diff::Table {
+            names: self.state.dp.field_names(),
+            rows,
+        };
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
         let weak = Rc::downgrade(self);
         crate::history::show(
             self.window().as_ref(),
@@ -2001,12 +2171,23 @@ impl DocumentView {
     /// Troca o documento pela versão `v`. Alterações não salvas não se
     /// perdem: antes, o estado atual entra no histórico.
     fn restore_version(self: &Rc<Self>, v: crate::backup::Version) {
-        let Some(handler) = self.restore_handler.borrow().clone() else { return };
+        let Some(handler) = self.restore_handler.borrow().clone() else {
+            return;
+        };
         if self.is_dirty() {
-            let saved = self.state.dp.to_xml().map_err(|e| e.to_string()).and_then(|xml| {
-                crate::backup::save_snapshot(&v.original, xml.as_bytes(), crate::backup::Kind::BeforeRestore)
+            let saved = self
+                .state
+                .dp
+                .to_xml()
+                .map_err(|e| e.to_string())
+                .and_then(|xml| {
+                    crate::backup::save_snapshot(
+                        &v.original,
+                        xml.as_bytes(),
+                        crate::backup::Kind::BeforeRestore,
+                    )
                     .map_err(|e| e.to_string())
-            });
+                });
             if let Err(e) = saved {
                 self.error(&format!("{}\n{e}", tr("history_snapshot_error")));
                 return;
@@ -2047,8 +2228,10 @@ impl DocumentView {
     /// consulta SQL livre não corresponde às linhas da tabela.
     fn refresh_history_buttons(&self) {
         let editable = *self.state.editable.borrow();
-        self.undo_btn.set_sensitive(editable && self.state.dp.can_undo());
-        self.redo_btn.set_sensitive(editable && self.state.dp.can_redo());
+        self.undo_btn
+            .set_sensitive(editable && self.state.dp.can_undo());
+        self.redo_btn
+            .set_sensitive(editable && self.state.dp.can_redo());
     }
 
     /// `true` se o foco está num campo de texto (célula em edição, filtro,
@@ -2112,7 +2295,11 @@ impl DocumentView {
             return;
         }
         self.commit_pending_edit();
-        let res = if forward { self.state.dp.redo() } else { self.state.dp.undo() };
+        let res = if forward {
+            self.state.dp.redo()
+        } else {
+            self.state.dp.undo()
+        };
         match res {
             Ok(None) => {}
             Ok(Some(change)) => {
@@ -2127,8 +2314,17 @@ impl DocumentView {
     /// e colunas afetadas — sem recarregar a tabela.
     fn show_change(self: &Rc<Self>, change: Change) {
         match change {
-            Change::Cell { rowid, column, value } => {
-                let col = self.state.columns.borrow().iter().position(|c| *c == column);
+            Change::Cell {
+                rowid,
+                column,
+                value,
+            } => {
+                let col = self
+                    .state
+                    .columns
+                    .borrow()
+                    .iter()
+                    .position(|c| *c == column);
                 let (Some(col), Some(pos)) = (col, self.row_position(rowid)) else {
                     return; // linha ou coluna fora da visão atual
                 };
@@ -2169,7 +2365,11 @@ impl DocumentView {
                         Change::RowRemoved { rowid } => {
                             removed.insert(rowid);
                         }
-                        Change::Cell { rowid, column, value } => cells.push((rowid, column, value)),
+                        Change::Cell {
+                            rowid,
+                            column,
+                            value,
+                        } => cells.push((rowid, column, value)),
                         other => self.show_change(other),
                     }
                 }
@@ -2212,7 +2412,11 @@ impl DocumentView {
                 }
                 self.select_rowid(a);
             }
-            Change::ColumnAdded { index, name, values } => {
+            Change::ColumnAdded {
+                index,
+                name,
+                values,
+            } => {
                 let cnt = self.store.n_items();
                 for i in 0..cnt {
                     if let Some(obj) = self.store.item(i) {
@@ -2243,7 +2447,13 @@ impl DocumentView {
                 self.rebuild_columns(&names);
             }
             Change::ColumnRenamed { from, to } => {
-                if let Some(c) = self.state.columns.borrow_mut().iter_mut().find(|c| **c == from) {
+                if let Some(c) = self
+                    .state
+                    .columns
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|c| **c == from)
+                {
                     *c = to;
                 }
                 let names = self.state.columns.borrow().clone();
@@ -2271,7 +2481,11 @@ impl DocumentView {
                 pos_of.insert(obj.downcast::<RowObject>().unwrap().rowid(), i);
             }
         }
-        let at = match self.state.dp.next_row_where(rowid, |id| pos_of.contains_key(&id)) {
+        let at = match self
+            .state
+            .dp
+            .next_row_where(rowid, |id| pos_of.contains_key(&id))
+        {
             Ok(Some(next)) => pos_of[&next],
             Ok(None) => self.store.n_items(),
             Err(e) => {
@@ -2288,7 +2502,8 @@ impl DocumentView {
     fn select_rowid(&self, rowid: i64) {
         if let Some(pos) = self.row_position(rowid) {
             self.select_only(pos);
-            self.colview.scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
+            self.colview
+                .scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
         }
     }
 
@@ -2338,7 +2553,8 @@ impl DocumentView {
                 self.store.insert(at, &obj);
                 self.refresh_status();
                 self.select_only(at);
-                self.colview.scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
+                self.colview
+                    .scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
         }
@@ -2382,7 +2598,9 @@ impl DocumentView {
         let items = self.cell_items.borrow();
         while let Some(cur) = w {
             if let Some((li, col)) = items.get(&cur) {
-                let pos = li.upgrade().map_or(gtk::INVALID_LIST_POSITION, |li| li.position());
+                let pos = li
+                    .upgrade()
+                    .map_or(gtk::INVALID_LIST_POSITION, |li| li.position());
                 return (pos != gtk::INVALID_LIST_POSITION).then_some((pos, *col, cur));
             }
             w = cur.parent();
@@ -2427,7 +2645,9 @@ impl DocumentView {
         let s2 = st.clone();
         drag.connect_drag_update(move |g, dx, dy| {
             let Some(me) = weak.upgrade() else { return };
-            let Some((sx, sy)) = g.start_point() else { return };
+            let Some((sx, sy)) = g.start_point() else {
+                return;
+            };
             s2.last.set((sx + dx, sy + dy));
             if !s2.active.get() {
                 let Some(from) = s2.start.get() else { return };
@@ -2473,7 +2693,9 @@ impl DocumentView {
     /// borda e seleciona da linha de origem até a linha sob o ponteiro.
     /// Devolve `true` se rolou (o temporizador deve continuar).
     fn drag_select_step(&self, st: &DragSelect) -> bool {
-        let Some(from) = st.start.get() else { return false };
+        let Some(from) = st.start.get() else {
+            return false;
+        };
         let (x, y) = st.last.get();
         const HEADER: f64 = 30.0;
         const EDGE: f64 = 24.0;
@@ -2531,7 +2753,10 @@ impl DocumentView {
                 // Cliques dentro do menu (e dos submenus) chegam de outra
                 // superfície; só os da superfície da janela estão fora dele.
                 let clicked = g.current_event().and_then(|e| e.surface());
-                let window = g.widget().and_then(|w| w.native()).and_then(|n| n.surface());
+                let window = g
+                    .widget()
+                    .and_then(|w| w.native())
+                    .and_then(|n| n.surface());
                 if clicked.is_some() && clicked == window {
                     close_menu(me.menu.upcast_ref());
                     close_menu(me.header_menu.upcast_ref());
@@ -2573,7 +2798,12 @@ impl DocumentView {
 
     /// Shift: retângulo da célula âncora até (`pos`, `col`).
     fn select_cells_to(&self, pos: u32, col: usize) {
-        let anchor = self.anchor.borrow().as_ref().and_then(|r| self.store.find(r)).unwrap_or(pos);
+        let anchor = self
+            .anchor
+            .borrow()
+            .as_ref()
+            .and_then(|r| self.store.find(r))
+            .unwrap_or(pos);
         self.set_cell_rects(vec![CellRect::new(anchor, pos, self.anchor_col.get(), col)]);
     }
 
@@ -2646,7 +2876,9 @@ impl DocumentView {
         if rects.is_empty() {
             let cur = self.cur_cell.borrow().clone();
             let Some((row, col)) = cur else { return };
-            let Some(pos) = self.store.find(&row) else { return };
+            let Some(pos) = self.store.find(&row) else {
+                return;
+            };
             rects.push(CellRect::new(pos, pos, col, col));
         }
         let ncol = self.state.columns.borrow().len();
@@ -2654,7 +2886,10 @@ impl DocumentView {
             Default::default();
         for r in &rects {
             for pos in r.r0..=r.r1.min(self.store.n_items().saturating_sub(1)) {
-                by_row.entry(pos).or_default().extend((r.c0..=r.c1).filter(|&c| c < ncol));
+                by_row
+                    .entry(pos)
+                    .or_default()
+                    .extend((r.c0..=r.c1).filter(|&c| c < ncol));
             }
         }
         let changed: Vec<(u32, RowObject, Vec<(usize, String)>)> = by_row
@@ -2670,7 +2905,8 @@ impl DocumentView {
             })
             .collect();
         let n = self.apply_replacements(changed);
-        self.status.set_text(&format!("{n} {}", tr("cells_cleared")));
+        self.status
+            .set_text(&format!("{n} {}", tr("cells_cleared")));
     }
 
     /// Delete: exclui as linhas selecionadas (ou a linha atual).
@@ -2701,7 +2937,11 @@ impl DocumentView {
 
     /// Shift: seleciona da âncora até `pos` (a âncora não muda).
     fn select_range_to(&self, pos: u32) {
-        let anchor = self.anchor.borrow().as_ref().and_then(|r| self.store.find(r));
+        let anchor = self
+            .anchor
+            .borrow()
+            .as_ref()
+            .and_then(|r| self.store.find(r));
         let Some(anchor) = anchor else {
             self.select_only(pos);
             return;
@@ -2736,7 +2976,11 @@ impl DocumentView {
     fn selected_rows(&self) -> Vec<RowObject> {
         let set = self.selection.selection();
         (0..set.size())
-            .filter_map(|i| self.store.item(set.nth(i as u32)).and_downcast::<RowObject>())
+            .filter_map(|i| {
+                self.store
+                    .item(set.nth(i as u32))
+                    .and_downcast::<RowObject>()
+            })
             .collect()
     }
 
@@ -2755,12 +2999,14 @@ impl DocumentView {
             }
         }
         let n = self.store.n_items();
-        self.selection.set_selection(&set, &gtk::Bitset::new_range(0, n));
+        self.selection
+            .set_selection(&set, &gtk::Bitset::new_range(0, n));
         if let Some(p) = first {
             let row = self.store.item(p).and_downcast::<RowObject>();
             *self.anchor.borrow_mut() = row.clone();
             *self.cursor.borrow_mut() = row;
-            self.colview.scroll_to(p, None, gtk::ListScrollFlags::FOCUS, None);
+            self.colview
+                .scroll_to(p, None, gtk::ListScrollFlags::FOCUS, None);
         }
     }
 
@@ -2773,7 +3019,8 @@ impl DocumentView {
         *self.anchor.borrow_mut() = anchor;
         let pos = self.cursor_pos();
         if pos != gtk::INVALID_LIST_POSITION {
-            self.colview.scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
+            self.colview
+                .scroll_to(pos, None, gtk::ListScrollFlags::FOCUS, None);
         }
     }
 
@@ -2787,10 +3034,15 @@ impl DocumentView {
             return 0;
         }
         let names = self.state.columns.borrow().clone();
-        let values: Vec<Vec<String>> =
-            rows.iter().map(|r| (0..names.len()).map(|c| r.value(c)).collect()).collect();
-        self.root.clipboard().set_text(&rowclip::rows_to_xml(&names, &values));
-        self.status.set_text(&format!("{} {}", rows.len(), tr("rows_copied")));
+        let values: Vec<Vec<String>> = rows
+            .iter()
+            .map(|r| (0..names.len()).map(|c| r.value(c)).collect())
+            .collect();
+        self.root
+            .clipboard()
+            .set_text(&rowclip::rows_to_xml(&names, &values));
+        self.status
+            .set_text(&format!("{} {}", rows.len(), tr("rows_copied")));
         rows.len()
     }
 
@@ -2803,7 +3055,8 @@ impl DocumentView {
         let ids: Vec<i64> = self.selected_rows().iter().map(|r| r.rowid()).collect();
         if self.copy_rows() > 0 {
             self.delete_rowids(&ids);
-            self.status.set_text(&format!("{} {}", ids.len(), tr("rows_cut")));
+            self.status
+                .set_text(&format!("{} {}", ids.len(), tr("rows_cut")));
         }
     }
 
@@ -2815,17 +3068,28 @@ impl DocumentView {
             return;
         }
         let weak = Rc::downgrade(self);
-        self.root.clipboard().read_text_async(gio::Cancellable::NONE, move |res| {
-            let Some(me) = weak.upgrade() else { return };
-            let text = res.ok().flatten().map(|t| t.to_string()).unwrap_or_default();
-            match rowclip::parse_rows(&text) {
-                Some(rows) => me.insert_pasted(ref_rowid.filter(|r| *r >= 0), above, &rows),
-                None => me.status.set_text(tr("paste_nothing")),
-            }
-        });
+        self.root
+            .clipboard()
+            .read_text_async(gio::Cancellable::NONE, move |res| {
+                let Some(me) = weak.upgrade() else { return };
+                let text = res
+                    .ok()
+                    .flatten()
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+                match rowclip::parse_rows(&text) {
+                    Some(rows) => me.insert_pasted(ref_rowid.filter(|r| *r >= 0), above, &rows),
+                    None => me.status.set_text(tr("paste_nothing")),
+                }
+            });
     }
 
-    fn insert_pasted(self: &Rc<Self>, ref_rowid: Option<i64>, above: bool, rows: &[Vec<(String, String)>]) {
+    fn insert_pasted(
+        self: &Rc<Self>,
+        ref_rowid: Option<i64>,
+        above: bool,
+        rows: &[Vec<(String, String)>],
+    ) {
         let (created, ignored) = match self.state.dp.insert_rows(ref_rowid, above, rows) {
             Ok(r) => r,
             Err(e) => {
@@ -2833,8 +3097,10 @@ impl DocumentView {
                 return;
             }
         };
-        let objs: Vec<RowObject> =
-            created.into_iter().map(|(rid, vals)| RowObject::new(rid, vals, true)).collect();
+        let objs: Vec<RowObject> = created
+            .into_iter()
+            .map(|(rid, vals)| RowObject::new(rid, vals, true))
+            .collect();
         let at = ref_rowid
             .and_then(|r| self.row_position(r))
             .map(|p| if above { p } else { p + 1 })
@@ -2847,7 +3113,11 @@ impl DocumentView {
         self.mark_dirty();
         let mut msg = format!("{} {}", objs.len(), tr("rows_pasted"));
         if !ignored.is_empty() {
-            msg.push_str(&format!("  ·  {}: {}", tr("paste_ignored"), ignored.join(", ")));
+            msg.push_str(&format!(
+                "  ·  {}: {}",
+                tr("paste_ignored"),
+                ignored.join(", ")
+            ));
         }
         self.status.set_text(&msg);
     }
@@ -2861,18 +3131,20 @@ impl DocumentView {
             return;
         }
         let weak = Rc::downgrade(self);
-        self.root.clipboard().read_text_async(gio::Cancellable::NONE, move |res| {
-            let Some(me) = weak.upgrade() else { return };
-            let has_rows = res.ok().flatten().is_some_and(|t| t.contains("<ROW"));
-            me.paste_section.remove_all();
-            if has_rows {
-                let sub = gio::Menu::new();
-                sub.append(Some(tr("ctx_paste_above")), Some("doc.paste-above"));
-                sub.append(Some(tr("ctx_paste_below")), Some("doc.paste-below"));
-                me.paste_section.append_submenu(Some(tr("ctx_paste")), &sub);
-            }
-            open_menu(me.menu.upcast_ref());
-        });
+        self.root
+            .clipboard()
+            .read_text_async(gio::Cancellable::NONE, move |res| {
+                let Some(me) = weak.upgrade() else { return };
+                let has_rows = res.ok().flatten().is_some_and(|t| t.contains("<ROW"));
+                me.paste_section.remove_all();
+                if has_rows {
+                    let sub = gio::Menu::new();
+                    sub.append(Some(tr("ctx_paste_above")), Some("doc.paste-above"));
+                    sub.append(Some(tr("ctx_paste_below")), Some("doc.paste-below"));
+                    me.paste_section.append_submenu(Some(tr("ctx_paste")), &sub);
+                }
+                open_menu(me.menu.upcast_ref());
+            });
     }
 
     /// Tira da grade as linhas `ids`. Muitas de uma vez viram uma única troca
@@ -2909,8 +3181,10 @@ impl DocumentView {
         if vis.is_empty() {
             return;
         }
-        let new: Vec<RowObject> =
-            vis.into_iter().map(|(rid, vals)| RowObject::new(rid, vals, true)).collect();
+        let new: Vec<RowObject> = vis
+            .into_iter()
+            .map(|(rid, vals)| RowObject::new(rid, vals, true))
+            .collect();
         let n = self.store.n_items();
         if self.is_sorted() {
             self.store.splice(n, 0, &new);
@@ -2924,8 +3198,9 @@ impl DocumentView {
                     return;
                 }
             };
-            let mut all: Vec<RowObject> =
-                (0..n).filter_map(|i| self.store.item(i).and_downcast::<RowObject>()).collect();
+            let mut all: Vec<RowObject> = (0..n)
+                .filter_map(|i| self.store.item(i).and_downcast::<RowObject>())
+                .collect();
             all.extend(new.iter().cloned());
             let key = |r: &RowObject| ord.get(&r.rowid()).copied().unwrap_or(f64::MAX);
             all.sort_by(|a, b| key(a).total_cmp(&key(b)));
@@ -2952,7 +3227,8 @@ impl DocumentView {
                 self.store.insert(at, &obj);
                 self.refresh_status();
                 self.select_only(at);
-                self.colview.scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
+                self.colview
+                    .scroll_to(at, None, gtk::ListScrollFlags::FOCUS, None);
             }
             Err(e) => self.error(&format!("{}\n{e}", tr("error"))),
         }
@@ -3027,7 +3303,9 @@ impl DocumentView {
                 let cnt = self.store.n_items();
                 for i in 0..cnt {
                     if let Some(obj) = self.store.item(i) {
-                        obj.downcast::<RowObject>().unwrap().push_value(String::new());
+                        obj.downcast::<RowObject>()
+                            .unwrap()
+                            .push_value(String::new());
                     }
                 }
                 self.state.columns.borrow_mut().push(name);
@@ -3097,7 +3375,12 @@ struct CellRect {
 
 impl CellRect {
     fn new(ra: u32, rb: u32, ca: usize, cb: usize) -> Self {
-        Self { r0: ra.min(rb), r1: ra.max(rb), c0: ca.min(cb), c1: ca.max(cb) }
+        Self {
+            r0: ra.min(rb),
+            r1: ra.max(rb),
+            c0: ca.min(cb),
+            c1: ca.max(cb),
+        }
     }
 
     fn contains(&self, row: u32, col: usize) -> bool {
@@ -3218,7 +3501,11 @@ fn current_word(text: &str, cursor: usize) -> (usize, usize, String) {
 /// SQL simples (ou contiver caracteres fora de `[A-Za-z0-9_]` / iniciar com dígito).
 fn quote_ident(name: &str) -> String {
     let simple = !name.is_empty()
-        && name.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_alphabetic() || c == '_')
+            .unwrap_or(false)
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if simple {
         name.to_string()

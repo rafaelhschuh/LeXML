@@ -1,7 +1,7 @@
 use crate::dialog;
 use crate::i18n::tr;
-use gtk::prelude::*;
 use gtk::glib::{self, clone};
+use gtk::prelude::*;
 use gtk::{gdk, gio};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -154,7 +154,11 @@ impl TextDocView {
     pub fn save_then(self: &Rc<Self>, after: impl FnOnce(bool) + 'static) {
         let known = {
             let p = self.path.borrow();
-            if p.is_absolute() { Some(p.clone()) } else { None }
+            if p.is_absolute() {
+                Some(p.clone())
+            } else {
+                None
+            }
         };
         if let Some(path) = known {
             let ok = self.write_to(&path);
@@ -189,7 +193,9 @@ impl TextDocView {
     }
 
     fn window(&self) -> Option<gtk::Window> {
-        self.root.root().and_then(|r| r.downcast::<gtk::Window>().ok())
+        self.root
+            .root()
+            .and_then(|r| r.downcast::<gtk::Window>().ok())
     }
 
     fn error(&self, body: &str) {

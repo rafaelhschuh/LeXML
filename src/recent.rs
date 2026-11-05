@@ -54,7 +54,9 @@ pub fn list() -> Vec<PathBuf> {
 pub fn add(path: &Path) {
     // Só caminhos absolutos: um relativo apontaria para outro lugar quando o
     // app fosse aberto a partir de outra pasta.
-    let Ok(abs) = std::path::absolute(path) else { return };
+    let Ok(abs) = std::path::absolute(path) else {
+        return;
+    };
     let file = recent_path();
     let mut list = read_list(&file);
     push_front(&mut list, abs);
@@ -72,11 +74,18 @@ mod tests {
 
     #[test]
     fn push_front_move_para_o_topo_sem_duplicar_e_corta_no_limite() {
-        let mut l: Vec<PathBuf> = (0..MAX_RECENT).map(|i| PathBuf::from(format!("/a/{i}.xml"))).collect();
+        let mut l: Vec<PathBuf> = (0..MAX_RECENT)
+            .map(|i| PathBuf::from(format!("/a/{i}.xml")))
+            .collect();
         push_front(&mut l, PathBuf::from("/a/5.xml"));
         assert_eq!(l[0], PathBuf::from("/a/5.xml"));
         assert_eq!(l.len(), MAX_RECENT);
-        assert_eq!(l.iter().filter(|p| **p == PathBuf::from("/a/5.xml")).count(), 1);
+        assert_eq!(
+            l.iter()
+                .filter(|p| **p == PathBuf::from("/a/5.xml"))
+                .count(),
+            1
+        );
 
         push_front(&mut l, PathBuf::from("/b/novo.xml"));
         assert_eq!(l[0], PathBuf::from("/b/novo.xml"));

@@ -47,7 +47,10 @@ pub fn show(
             .margin_start(10)
             .margin_end(10)
             .build();
-        let when = gtk::Label::builder().label(format_when(v.when)).xalign(0.0).build();
+        let when = gtk::Label::builder()
+            .label(format_when(v.when))
+            .xalign(0.0)
+            .build();
         when.add_css_class("heading");
         row.append(&when);
         let detail = format!("{}  ·  {}", kind_label(v.kind), glib::format_size(v.size));
@@ -128,7 +131,10 @@ pub fn show(
     {
         let (win, list) = (win.clone(), list.clone());
         restore_btn.connect_clicked(move |_| {
-            let Some(v) = list.selected_row().and_then(|r| versions.get(r.index() as usize)) else {
+            let Some(v) = list
+                .selected_row()
+                .and_then(|r| versions.get(r.index() as usize))
+            else {
                 return;
             };
             let v = v.clone();

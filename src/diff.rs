@@ -74,13 +74,18 @@ impl Table {
     /// Posição, em cada linha, de cada coluna de `cols` (`None` se a
     /// tabela não tem a coluna). Calculada uma vez por comparação.
     fn index(&self, cols: &[String]) -> Vec<Option<usize>> {
-        cols.iter().map(|c| self.names.iter().position(|n| n == c).map(|i| i + 1)).collect()
+        cols.iter()
+            .map(|c| self.names.iter().position(|n| n == c).map(|i| i + 1))
+            .collect()
     }
 
     /// Valores da linha `row` nas posições `idx` ("" onde a coluna não existe).
     fn values(&self, row: usize, idx: &[Option<usize>]) -> Vec<String> {
         idx.iter()
-            .map(|i| i.and_then(|i| self.rows[row].get(i).cloned()).unwrap_or_default())
+            .map(|i| {
+                i.and_then(|i| self.rows[row].get(i).cloned())
+                    .unwrap_or_default()
+            })
             .collect()
     }
 }
@@ -103,7 +108,12 @@ enum Op {
 }
 
 fn diff_tables(a: &Table, b: &Table) -> Diff {
-    let mut common: Vec<String> = b.names.iter().filter(|n| a.names.contains(n)).cloned().collect();
+    let mut common: Vec<String> = b
+        .names
+        .iter()
+        .filter(|n| a.names.contains(n))
+        .cloned()
+        .collect();
     if common.is_empty() {
         // nenhuma coluna em comum: compara as linhas inteiras
         common = b.names.clone();
@@ -112,14 +122,30 @@ fn diff_tables(a: &Table, b: &Table) -> Diff {
     let mut columns: Vec<(String, ColState)> = b
         .names
         .iter()
-        .map(|n| (n.clone(), if a.names.contains(n) { ColState::Same } else { ColState::Added }))
+        .map(|n| {
+            (
+                n.clone(),
+                if a.names.contains(n) {
+                    ColState::Same
+                } else {
+                    ColState::Added
+                },
+            )
+        })
         .collect();
-    columns.extend(a.names.iter().filter(|n| !b.names.contains(n)).map(|n| (n.clone(), ColState::Removed)));
+    columns.extend(
+        a.names
+            .iter()
+            .filter(|n| !b.names.contains(n))
+            .map(|n| (n.clone(), ColState::Removed)),
+    );
     let all: Vec<String> = columns.iter().map(|(n, _)| n.clone()).collect();
 
     let key = |t: &Table| -> Vec<String> {
         let idx = t.index(&common);
-        (0..t.rows.len()).map(|r| t.values(r, &idx).join("\u{1f}")).collect()
+        (0..t.rows.len())
+            .map(|r| t.values(r, &idx).join("\u{1f}"))
+            .collect()
     };
     let (ka, kb) = (key(a), key(b));
     let (ia, ib) = (a.index(&all), b.index(&all));
@@ -145,7 +171,11 @@ fn diff_tables(a: &Table, b: &Table) -> Diff {
         for k in 0..pairs {
             let (i, j) = (dels[k], adds[k]);
             if similar(&ka[i], &kb[j]) {
-                rows.push(DiffRow { tag: Tag::Changed, values: both(i, j), old: a.values(i, &ia) });
+                rows.push(DiffRow {
+                    tag: Tag::Changed,
+                    values: both(i, j),
+                    old: a.values(i, &ia),
+                });
                 changed += 1;
             } else {
                 rest_d.push(i);
@@ -155,11 +185,19 @@ fn diff_tables(a: &Table, b: &Table) -> Diff {
         rest_d.extend_from_slice(&dels[pairs..]);
         rest_a.extend_from_slice(&adds[pairs..]);
         for i in rest_d {
-            rows.push(DiffRow { tag: Tag::Removed, values: a.values(i, &ia), old: Vec::new() });
+            rows.push(DiffRow {
+                tag: Tag::Removed,
+                values: a.values(i, &ia),
+                old: Vec::new(),
+            });
             removed += 1;
         }
         for j in rest_a {
-            rows.push(DiffRow { tag: Tag::Added, values: b.values(j, &ib), old: Vec::new() });
+            rows.push(DiffRow {
+                tag: Tag::Added,
+                values: b.values(j, &ib),
+                old: Vec::new(),
+            });
             added += 1;
         }
         dels.clear();
@@ -171,7 +209,11 @@ fn diff_tables(a: &Table, b: &Table) -> Diff {
             Op::Add(j) => adds.push(j),
             Op::Same(i, j) => {
                 flush(&mut dels, &mut adds, &mut rows);
-                rows.push(DiffRow { tag: Tag::Same, values: both(i, j), old: Vec::new() });
+                rows.push(DiffRow {
+                    tag: Tag::Same,
+                    values: both(i, j),
+                    old: Vec::new(),
+                });
             }
         }
     }
@@ -186,13 +228,21 @@ fn diff_tables(a: &Table, b: &Table) -> Diff {
     } else {
         collapse(rows)
     };
-    Diff { columns, rows, added, removed, changed, truncated }
+    Diff {
+        columns,
+        rows,
+        added,
+        removed,
+        changed,
+        truncated,
+    }
 }
 
 /// Duas linhas são "a mesma, alterada" se no máximo metade das células
 /// mudou.
 fn similar(a: &str, b: &str) -> bool {
-    let (va, vb): (Vec<&str>, Vec<&str>) = (a.split('\u{1f}').collect(), b.split('\u{1f}').collect());
+    let (va, vb): (Vec<&str>, Vec<&str>) =
+        (a.split('\u{1f}').collect(), b.split('\u{1f}').collect());
     let differ = va.iter().zip(&vb).filter(|(x, y)| x != y).count();
     differ * 2 <= va.len().max(1)
 }
@@ -210,7 +260,11 @@ fn diff_ops(a: &[String], b: &[String]) -> Vec<Op> {
     let (ma, mb) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
 
     let mut out: Vec<Op> = (0..pre).map(|i| Op::Same(i, i)).collect();
-    let mid = if ma.len().saturating_mul(mb.len()) <= LCS_LIMIT { lcs(ma, mb) } else { by_content(ma, mb) };
+    let mid = if ma.len().saturating_mul(mb.len()) <= LCS_LIMIT {
+        lcs(ma, mb)
+    } else {
+        by_content(ma, mb)
+    };
     out.extend(mid.into_iter().map(|op| match op {
         Op::Same(i, j) => Op::Same(i + pre, j + pre),
         Op::Del(i) => Op::Del(i + pre),
@@ -283,14 +337,22 @@ fn by_content(a: &[String], b: &[String]) -> Vec<Op> {
 /// Recolhe os trechos iguais longos, mantendo `CONTEXT` linhas em volta de
 /// cada mudança, e corta a lista em `MAX_LINES`.
 fn collapse(rows: Vec<DiffRow>) -> (Vec<DiffRow>, bool) {
-    let changed: Vec<usize> =
-        rows.iter().enumerate().filter(|(_, r)| r.tag != Tag::Same).map(|(i, _)| i).collect();
+    let changed: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.tag != Tag::Same)
+        .map(|(i, _)| i)
+        .collect();
     let near = |i: usize| {
         // há mudança a até CONTEXT linhas de i?
         let p = changed.partition_point(|&c| c + CONTEXT < i);
         changed.get(p).is_some_and(|&c| c <= i + CONTEXT)
     };
-    let gap = |n: usize| DiffRow { tag: Tag::Gap, values: vec![n.to_string()], old: Vec::new() };
+    let gap = |n: usize| DiffRow {
+        tag: Tag::Gap,
+        values: vec![n.to_string()],
+        old: Vec::new(),
+    };
     let mut out = Vec::new();
     let mut skipped = 0;
     for (i, row) in rows.into_iter().enumerate() {
@@ -327,7 +389,12 @@ mod tests {
             names: v(names),
             rows: rows
                 .iter()
-                .map(|r| std::iter::once("0").chain(r.split('|')).map(String::from).collect())
+                .map(|r| {
+                    std::iter::once("0")
+                        .chain(r.split('|'))
+                        .map(String::from)
+                        .collect()
+                })
                 .collect(),
         }
     }
@@ -362,7 +429,13 @@ mod tests {
         let b = table(&["id"], &["1", "2"]);
         let d = diff_tables(&a, &b);
         assert_eq!((d.added, d.removed, d.changed), (0, 0, 0));
-        assert_eq!(d.columns, [("id".to_string(), ColState::Same), ("valor".to_string(), ColState::Removed)]);
+        assert_eq!(
+            d.columns,
+            [
+                ("id".to_string(), ColState::Same),
+                ("valor".to_string(), ColState::Removed)
+            ]
+        );
         // a coluna apagada continua mostrando o valor que tinha
         assert_eq!(d.rows[0].values, ["1", "10"]);
     }
@@ -370,13 +443,22 @@ mod tests {
     #[test]
     fn trechos_iguais_longos_sao_recolhidos() {
         let rows: Vec<String> = (0..100).map(|i| format!("{i}|x")).collect();
-        let a = table(&["id", "v"], &rows.iter().map(String::as_str).collect::<Vec<_>>());
+        let a = table(
+            &["id", "v"],
+            &rows.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
         let mut rb = rows.clone();
         rb[50] = "50|y".into();
-        let b = table(&["id", "v"], &rb.iter().map(String::as_str).collect::<Vec<_>>());
+        let b = table(
+            &["id", "v"],
+            &rb.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
         let d = diff_tables(&a, &b);
         assert!(!d.truncated);
-        assert_eq!((d.rows[0].tag, d.rows[0].values[0].as_str()), (Tag::Gap, "48"));
+        assert_eq!(
+            (d.rows[0].tag, d.rows[0].values[0].as_str()),
+            (Tag::Gap, "48")
+        );
         let last = d.rows.last().unwrap();
         assert_eq!((last.tag, last.values[0].as_str()), (Tag::Gap, "47"));
         assert_eq!(d.rows.iter().filter(|r| r.tag == Tag::Same).count(), 4);
