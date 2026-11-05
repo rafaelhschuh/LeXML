@@ -110,7 +110,7 @@ cargo fmt --all
 cargo clippy --all-targets
 ```
 
-> Na versão 0.5.4, a árvore ainda possui avisos do Clippy, principalmente pelo
+> Na versão 0.6.0, a árvore ainda possui avisos do Clippy, principalmente pelo
 > uso da sintaxe antiga do macro `glib::clone!`, além de itens não utilizados.
 > Portanto, `cargo clippy --all-targets -- -D warnings` ainda não passa.
 
@@ -213,8 +213,8 @@ O caminho normal é por tag — veja [Integração contínua](#integração-cont
 Suba a versão no `Cargo.toml`, faça o commit e empurre a tag correspondente:
 
 ```bash
-git tag v0.5.4
-git push origin v0.5.4
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 O workflow compila, roda os testes, gera os dois arquivos e cria a release.
