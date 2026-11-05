@@ -95,7 +95,7 @@ As instruções por distribuição estão em
 
 ## Estado do projeto
 
-Versão atual do crate: **0.6.0**.
+Versão atual do crate: **0.6.1**.
 
 O aplicativo é voltado ao Linux e utiliza GTK4 puro, sem libadwaita. O SQLite é
 compilado junto ao executável por meio da funcionalidade `bundled` do

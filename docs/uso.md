@@ -1,6 +1,6 @@
 # Guia de uso
 
-Este guia descreve o comportamento da versão 0.6.0 do Lê-XML.
+Este guia descreve o comportamento da versão 0.6.1 do Lê-XML.
 
 ## Conteúdo
 
@@ -553,7 +553,7 @@ O arquivo gerado:
 - duplica aspas internas conforme a convenção CSV;
 - não inclui as colunas internas de controle.
 
-Na versão 0.6.0, a exportação inclui todas as linhas da tabela original, mesmo
+Na versão 0.6.1, a exportação inclui todas as linhas da tabela original, mesmo
 que um filtro ou resultado SQL esteja visível.
 
 ## Configurações

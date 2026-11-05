@@ -212,8 +212,8 @@ O caminho normal é por tag — veja [Integração contínua](#integração-cont
 Suba a versão no `Cargo.toml`, faça o commit e empurre a tag correspondente:
 
 ```bash
-git tag v0.6.0
-git push origin v0.6.0
+git tag v0.6.1
+git push origin v0.6.1
 ```
 
 O workflow compila, roda os testes, gera os dois arquivos e cria a release.
