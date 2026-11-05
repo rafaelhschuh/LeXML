@@ -154,6 +154,9 @@ pub struct QueryResult {
     pub rows: Vec<Vec<String>>,
 }
 
+/// Linha criada por `insert_rows`: rowid e valores na ordem das colunas.
+pub type NewRow = (i64, Vec<String>);
+
 impl XmlDoc {
     pub fn open(path: &Path) -> Result<Self> {
         // Lê só o começo do arquivo para preservar a moldura do documento
@@ -518,6 +521,7 @@ impl XmlDoc {
     }
 
     /// Insere uma linha em branco no final. Retorna o rowid criado.
+    #[cfg(test)]
     pub fn add_row(&self) -> Result<i64> {
         let max: f64 = self.db.query_row(
             &format!("SELECT COALESCE(MAX({}), 0.0) FROM dados", self.q_ord()),
@@ -545,6 +549,7 @@ impl XmlDoc {
     }
 
     /// Exclui a linha de `rowid`.
+    #[cfg(test)]
     pub fn delete_row(&self, rowid: i64) -> Result<()> {
         let snap = self.row_snap(rowid)?;
         self.delete_row_raw(rowid)?;
@@ -708,6 +713,7 @@ impl XmlDoc {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn row_count(&self) -> i64 {
         self.db
             .query_row("SELECT COUNT(*) FROM dados", [], |r| r.get(0))
@@ -744,6 +750,7 @@ impl XmlDoc {
     /// 1. só aceita comandos que começam por SELECT/WITH/VALUES/EXPLAIN;
     /// 2. `PRAGMA query_only` bloqueia qualquer alteração em arquivo de banco;
     /// 3. `sqlite3_stmt_readonly` recusa o que ainda assim escreveria.
+    ///
     /// (ATTACH já é impossível: o limite de bancos anexados é zero — veja
     /// `open_db`.) Sem isso, a caixa rotulada "somente leitura" permitiria
     /// apagar os dados ou gravar arquivos arbitrários no disco.
@@ -1073,7 +1080,7 @@ impl XmlDoc {
         ref_rowid: Option<i64>,
         above: bool,
         rows: &[Vec<(String, String)>],
-    ) -> Result<(Vec<(i64, Vec<String>)>, Vec<String>)> {
+    ) -> Result<(Vec<NewRow>, Vec<String>)> {
         let names = self.field_names();
         if names.is_empty() {
             bail!("documento sem colunas");

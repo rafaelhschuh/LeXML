@@ -176,7 +176,7 @@ pub fn orphans() -> Vec<Orphan> {
             saved,
         });
     }
-    out.sort_by(|a, b| b.saved.cmp(&a.saved));
+    out.sort_by_key(|o| std::cmp::Reverse(o.saved));
     out
 }
 

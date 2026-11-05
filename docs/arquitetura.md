@@ -272,7 +272,7 @@ mantenha-os passando em vez de ajustá-los à nova saída.
 ```bash
 cargo fmt --all
 cargo test
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 

@@ -12,6 +12,12 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+/// Linha da tabela, objeto da grade e células trocadas (coluna, valor novo).
+type Replacement = (u32, RowObject, Vec<(usize, String)>);
+
+/// O que fazer com a versão escolhida no histórico.
+type RestoreHandler = Rc<dyn Fn(crate::backup::Version)>;
+
 /// Estado compartilhado de um documento aberto.
 struct State {
     dp: XmlDoc,
@@ -99,7 +105,7 @@ pub struct DocumentView {
     // Último instantâneo do histórico de versões tirado durante a edição.
     last_snapshot: Cell<std::time::Instant>,
     // Quem troca o documento da janela por uma versão restaurada (`app`).
-    restore_handler: RefCell<Option<Rc<dyn Fn(crate::backup::Version)>>>,
+    restore_handler: RefCell<Option<RestoreHandler>>,
     busy_shade: gtk::Box,
     busy_spinner: gtk::Spinner,
     busy_label: gtk::Label,
@@ -469,72 +475,148 @@ impl DocumentView {
         };
         actions.add_action(&mk(
             "row-above",
-            Box::new(clone!(@strong me => move || me.ctx_insert_row(true))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_insert_row(true)
+            )),
         ));
         actions.add_action(&mk(
             "row-below",
-            Box::new(clone!(@strong me => move || me.ctx_insert_row(false))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_insert_row(false)
+            )),
         ));
         actions.add_action(&mk(
             "cells-clear",
-            Box::new(clone!(@strong me => move || me.clear_selected_cells())),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.clear_selected_cells()
+            )),
         ));
         actions.add_action(&mk(
             "row-copy",
-            Box::new(clone!(@strong me => move || { me.copy_rows(); })),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || {
+                    me.copy_rows();
+                }
+            )),
         ));
         actions.add_action(&mk(
             "paste-above",
-            Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), true))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.paste_rows(Some(me.ctx_rowid.get()), true)
+            )),
         ));
         actions.add_action(&mk(
             "paste-below",
-            Box::new(clone!(@strong me => move || me.paste_rows(Some(me.ctx_rowid.get()), false))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.paste_rows(Some(me.ctx_rowid.get()), false)
+            )),
         ));
         actions.add_action(&mk(
             "row-delete",
-            Box::new(clone!(@strong me => move || me.ctx_delete_row())),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_delete_row()
+            )),
         ));
         actions.add_action(&mk(
             "row-clone-above",
-            Box::new(clone!(@strong me => move || me.ctx_clone_row(true))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_clone_row(true)
+            )),
         ));
         actions.add_action(&mk(
             "row-clone-below",
-            Box::new(clone!(@strong me => move || me.ctx_clone_row(false))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_clone_row(false)
+            )),
         ));
         actions.add_action(&mk(
             "row-move-up",
-            Box::new(clone!(@strong me => move || me.ctx_move_row(true))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_move_row(true)
+            )),
         ));
         actions.add_action(&mk(
             "row-move-down",
-            Box::new(clone!(@strong me => move || me.ctx_move_row(false))),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_move_row(false)
+            )),
         ));
         actions.add_action(&mk(
             "col-sum",
-            Box::new(clone!(@strong me => move || me.ctx_sum_column())),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_sum_column()
+            )),
         ));
         actions.add_action(&mk(
             "col-rename",
-            Box::new(clone!(@strong me => move || me.ctx_rename_column())),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_rename_column()
+            )),
         ));
         actions.add_action(&mk(
             "col-add",
-            Box::new(clone!(@strong me => move || me.ctx_add_column())),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_add_column()
+            )),
         ));
         actions.add_action(&mk(
             "col-delete",
-            Box::new(clone!(@strong me => move || me.ctx_delete_column())),
+            Box::new(clone!(
+                #[strong]
+                me,
+                move || me.ctx_delete_column()
+            )),
         ));
         me.root.insert_action_group("doc", Some(&actions));
 
         // ---------- conexões ----------
-        let apply_filter = clone!(@strong me, @weak filter_entry => move || {
-            me.apply_filter(&filter_entry.text());
-        });
-        filter_btn.connect_clicked(clone!(@strong apply_filter => move |_| apply_filter()));
-        filter_entry.connect_activate(clone!(@strong apply_filter => move |_| apply_filter()));
+        let apply_filter = clone!(
+            #[strong]
+            me,
+            #[weak]
+            filter_entry,
+            move || {
+                me.apply_filter(&filter_entry.text());
+            }
+        );
+        filter_btn.connect_clicked(clone!(
+            #[strong]
+            apply_filter,
+            move |_| apply_filter()
+        ));
+        filter_entry.connect_activate(clone!(
+            #[strong]
+            apply_filter,
+            move |_| apply_filter()
+        ));
 
         me.arm_filter_autocomplete(&filter_entry);
 
@@ -578,61 +660,128 @@ impl DocumentView {
         });
         me.root.add_controller(save_keys);
 
-        undo_btn.connect_clicked(clone!(@strong me => move |_| me.do_undo()));
-        me.selection.connect_selection_changed(clone!(@weak me => move |_, _, _| {
-            let n = me.selection.selection().size();
-            me.sel_label.set_text(&if n > 1 { format!("{n} {}", tr("rows_selected")) } else { String::new() });
-        }));
-        replace_toggle.connect_toggled(clone!(@strong me => move |t| {
-            if t.is_active() {
-                me.focus_replace_bar();
+        undo_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.do_undo()
+        ));
+        me.selection.connect_selection_changed(clone!(
+            #[weak]
+            me,
+            move |_, _, _| {
+                let n = me.selection.selection().size();
+                me.sel_label.set_text(&if n > 1 {
+                    format!("{n} {}", tr("rows_selected"))
+                } else {
+                    String::new()
+                });
             }
-        }));
-        replace_close
-            .connect_clicked(clone!(@strong me => move |_| me.replace_toggle.set_active(false)));
-        replace_btn.connect_clicked(clone!(@strong me => move |_| me.replace_one()));
-        replace_all_btn.connect_clicked(clone!(@strong me => move |_| me.replace_all()));
-        replace_entry.connect_activate(clone!(@strong me => move |_| me.replace_one()));
+        ));
+        replace_toggle.connect_toggled(clone!(
+            #[strong]
+            me,
+            move |t| {
+                if t.is_active() {
+                    me.focus_replace_bar();
+                }
+            }
+        ));
+        replace_close.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.replace_toggle.set_active(false)
+        ));
+        replace_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.replace_one()
+        ));
+        replace_all_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.replace_all()
+        ));
+        replace_entry.connect_activate(clone!(
+            #[strong]
+            me,
+            move |_| me.replace_one()
+        ));
         // Esc na barra de Substituir fecha a barra.
         let esc = gtk::EventControllerKey::new();
-        esc.connect_key_pressed(clone!(@strong me => @default-return glib::Propagation::Proceed, move |_, keyval, _, _| {
-            if keyval == gdk::Key::Escape {
-                me.replace_toggle.set_active(false);
-                me.find_entry.grab_focus();
-                return glib::Propagation::Stop;
+        esc.connect_key_pressed(clone!(
+            #[strong]
+            me,
+            move |_, keyval, _, _| {
+                if keyval == gdk::Key::Escape {
+                    me.replace_toggle.set_active(false);
+                    me.find_entry.grab_focus();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
             }
-            glib::Propagation::Proceed
-        }));
+        ));
         replace_revealer.add_controller(esc);
-        redo_btn.connect_clicked(clone!(@strong me => move |_| me.do_redo()));
-        sql_btn.connect_clicked(clone!(@strong me => move |_| me.open_sql_dialog()));
-        sum_btn.connect_clicked(clone!(@strong me => move |_| me.do_sum()));
-        save_btn.connect_clicked(clone!(@strong me => move |_| me.do_save()));
-        history_btn.connect_clicked(clone!(@strong me => move |_| me.show_history()));
-        csv_btn.connect_clicked(clone!(@strong me => move |_| me.do_export_csv()));
+        redo_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.do_redo()
+        ));
+        sql_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.open_sql_dialog()
+        ));
+        sum_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.do_sum()
+        ));
+        save_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.do_save()
+        ));
+        history_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.show_history()
+        ));
+        csv_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.do_export_csv()
+        ));
 
         // Busca com debounce: cada tecla agenda a busca ~250 ms depois; teclas
         // subsequentes invalidam o agendamento anterior (via geração). Assim uma
         // varredura O(linhas×colunas) não roda a cada tecla numa tabela grande.
-        find_entry.connect_search_changed(clone!(@strong me => move |e| {
-            let text = e.text().to_string();
-            if text.is_empty() {
-                return; // apagar o texto não procura células vazias
-            }
-            let g = me.search_gen.get().wrapping_add(1);
-            me.search_gen.set(g);
-            let me2 = me.clone();
-            glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
-                if me2.search_gen.get() == g {
-                    me2.find_next(&text);
+        find_entry.connect_search_changed(clone!(
+            #[strong]
+            me,
+            move |e| {
+                let text = e.text().to_string();
+                if text.is_empty() {
+                    return; // apagar o texto não procura células vazias
                 }
-            });
-        }));
+                let g = me.search_gen.get().wrapping_add(1);
+                me.search_gen.set(g);
+                let me2 = me.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                    if me2.search_gen.get() == g {
+                        me2.find_next(&text);
+                    }
+                });
+            }
+        ));
         // Enter busca imediatamente (sem esperar o debounce).
-        find_entry.connect_activate(clone!(@strong me => move |e| {
-            me.search_gen.set(me.search_gen.get().wrapping_add(1));
-            me.find_next(&e.text());
-        }));
+        find_entry.connect_activate(clone!(
+            #[strong]
+            me,
+            move |e| {
+                me.search_gen.set(me.search_gen.get().wrapping_add(1));
+                me.find_next(&e.text());
+            }
+        ));
 
         *me.weak_self.borrow_mut() = Rc::downgrade(&me);
         me.close_menus_on_outside_click();
@@ -788,7 +937,13 @@ impl DocumentView {
             }
         };
 
-        entry.connect_changed(clone!(@strong refresh => move |_| { refresh(); }));
+        entry.connect_changed(clone!(
+            #[strong]
+            refresh,
+            move |_| {
+                refresh();
+            }
+        ));
 
         // Tab/Enter completam; setas navegam; Esc fecha.
         let keys = gtk::EventControllerKey::new();
@@ -1315,7 +1470,7 @@ impl DocumentView {
                 label.set_text(&row.value(col_idx));
                 let editable = me_bind
                     .upgrade()
-                    .map_or(false, |m| *m.state.editable.borrow())
+                    .is_some_and(|m| *m.state.editable.borrow())
                     && row.editable();
                 label.set_editable(editable);
                 // As células são recicladas ao rolar: o destaque segue a
@@ -1690,7 +1845,7 @@ impl DocumentView {
         let mut next = 0u32;
         // Linhas alteradas: os RowObjects só mudam depois de o lote ser
         // confirmado, para uma falha no meio não deixar a grade divergente.
-        let mut changed: Vec<(u32, RowObject, Vec<(usize, String)>)> = Vec::new();
+        let mut changed: Vec<Replacement> = Vec::new();
         glib::idle_add_local(move || {
             let Some(me) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
@@ -1740,7 +1895,7 @@ impl DocumentView {
 
     /// Reflete na grade substituições já gravadas: troca os valores nos
     /// objetos das linhas e atualiza as células que estão na tela.
-    fn show_replacements(&self, changed: Vec<(u32, RowObject, Vec<(usize, String)>)>) {
+    fn show_replacements(&self, changed: Vec<Replacement>) {
         for (_, row, reps) in changed {
             for (c, v) in reps {
                 row.set_value(c, v);
@@ -1807,7 +1962,7 @@ impl DocumentView {
 
     /// Grava as substituições no banco (um passo de desfazer) e atualiza só as
     /// linhas afetadas na grade. Devolve quantas células mudaram.
-    fn apply_replacements(&self, changed: Vec<(u32, RowObject, Vec<(usize, String)>)>) -> usize {
+    fn apply_replacements(&self, changed: Vec<Replacement>) -> usize {
         if changed.is_empty() {
             return 0;
         }
@@ -2120,7 +2275,7 @@ impl DocumentView {
     }
 
     /// Define quem troca o documento da janela por uma versão restaurada.
-    pub fn set_restore_handler(&self, handler: Rc<dyn Fn(crate::backup::Version)>) {
+    pub fn set_restore_handler(&self, handler: RestoreHandler) {
         *self.restore_handler.borrow_mut() = Some(handler);
     }
 
@@ -2342,7 +2497,7 @@ impl DocumentView {
                     }
                 }
                 let cols = self.state.columns.borrow().clone();
-                let mut changed: Vec<(u32, RowObject, Vec<(usize, String)>)> = Vec::new();
+                let mut changed: Vec<Replacement> = Vec::new();
                 for (rowid, column, value) in cells {
                     let (Some(&pos), Some(c)) =
                         (pos_of.get(&rowid), cols.iter().position(|n| *n == column))
@@ -2892,7 +3047,7 @@ impl DocumentView {
                     .extend((r.c0..=r.c1).filter(|&c| c < ncol));
             }
         }
-        let changed: Vec<(u32, RowObject, Vec<(usize, String)>)> = by_row
+        let changed: Vec<Replacement> = by_row
             .into_iter()
             .filter_map(|(pos, cols)| {
                 let row = self.store.item(pos).and_downcast::<RowObject>()?;

@@ -107,12 +107,11 @@ cargo fmt --all
 ### Lints
 
 ```bash
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
 
-> Na versão 0.6.0, a árvore ainda possui avisos do Clippy, principalmente pelo
-> uso da sintaxe antiga do macro `glib::clone!`, além de itens não utilizados.
-> Portanto, `cargo clippy --all-targets -- -D warnings` ainda não passa.
+A árvore não tem avisos do Clippy nem trechos fora do `rustfmt`; o CI reprova
+qualquer novo aviso.
 
 ## Perfil de release
 
@@ -254,12 +253,10 @@ Dispara em push na `main`, em pull request e manualmente.
 | Job | Bloqueia? | O que faz |
 | --- | --- | --- |
 | `teste` | sim | `cargo test --all-targets` e `cargo build --release` |
-| `qualidade` | não | `cargo fmt --check` e `cargo clippy --all-targets` |
+| `qualidade` | sim | `cargo fmt --check` e `cargo clippy --all-targets -- -D warnings` |
 
-O job de qualidade é informativo de propósito: a árvore tem 62 blocos fora do
-`rustfmt` e 38 avisos do clippy, herdados e em boa parte vindos da sintaxe
-antiga do `glib::clone!`. Reprovar os PRs por esse passivo deixaria o CI
-vermelho desde o primeiro dia. Ao zerá-lo, remova o `continue-on-error` do job.
+Desde a 0.6.1 a árvore está sem passivo de formatação e de lints, então o job de
+qualidade também reprova: rode `cargo fmt` e o Clippy antes de enviar.
 
 A imagem é `ubuntu-24.04` fixa, não `ubuntu-latest`: o crate exige as APIs do
 GTK 4.12 e a 22.04 traz apenas a 4.6. Trocar de imagem deve ser uma decisão

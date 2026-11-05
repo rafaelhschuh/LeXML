@@ -312,7 +312,7 @@ pub fn from_event(key: gdk::Key, state: gdk::ModifierType) -> Option<String> {
 pub fn label(id: &str) -> String {
     accels(id)
         .iter()
-        .filter_map(|s| gtk::accelerator_parse(s))
+        .filter_map(gtk::accelerator_parse)
         .map(|(k, m)| gtk::accelerator_get_label(k, m).to_string())
         .collect::<Vec<_>>()
         .join(" / ")

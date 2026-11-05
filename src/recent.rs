@@ -82,7 +82,7 @@ mod tests {
         assert_eq!(l.len(), MAX_RECENT);
         assert_eq!(
             l.iter()
-                .filter(|p| **p == PathBuf::from("/a/5.xml"))
+                .filter(|p| p.as_path() == Path::new("/a/5.xml"))
                 .count(),
             1
         );

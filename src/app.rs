@@ -153,7 +153,11 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     // botão de configurações — abre uma JANELA flutuante com abas.
     let settings_btn = gtk::Button::from_icon_name("preferences-system-symbolic");
     settings_btn.set_tooltip_text(Some(tr("settings")));
-    settings_btn.connect_clicked(clone!(@weak window => move |_| show_settings(&window)));
+    settings_btn.connect_clicked(clone!(
+        #[weak]
+        window,
+        move |_| show_settings(&window)
+    ));
     header.pack_end(&settings_btn);
 
     window.set_titlebar(Some(&header));
@@ -163,9 +167,13 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     let (placeholder, open_center, recent_box) = build_placeholder();
     stack.add_named(&placeholder, Some("empty"));
     window.set_child(Some(&stack));
-    stack.connect_visible_child_name_notify(clone!(@weak home_btn => move |s| {
-        home_btn.set_sensitive(s.visible_child_name().as_deref() == Some("doc"));
-    }));
+    stack.connect_visible_child_name_notify(clone!(
+        #[weak]
+        home_btn,
+        move |s| {
+            home_btn.set_sensitive(s.visible_child_name().as_deref() == Some("doc"));
+        }
+    ));
 
     // mantém o documento vivo
     let current: Rc<RefCell<Option<OpenDoc>>> = Rc::new(RefCell::new(None));
@@ -214,7 +222,11 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         }
     };
 
-    open_btn.connect_clicked(clone!(@strong open_action => move |_| open_action()));
+    open_btn.connect_clicked(clone!(
+        #[strong]
+        open_action,
+        move |_| open_action()
+    ));
 
     // Arquivos recentes: tela inicial e menu da seta. A lista é relida quando
     // a janela ganha o foco ou o menu abre, porque outra janela pode tê-la
@@ -229,16 +241,24 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         })
     };
     refresh_recent();
-    window.connect_is_active_notify(clone!(@strong refresh_recent => move |w| {
-        if w.is_active() {
-            refresh_recent();
+    window.connect_is_active_notify(clone!(
+        #[strong]
+        refresh_recent,
+        move |w| {
+            if w.is_active() {
+                refresh_recent();
+            }
         }
-    }));
-    recent_btn.connect_active_notify(clone!(@strong refresh_recent => move |b| {
-        if b.is_active() {
-            refresh_recent();
+    ));
+    recent_btn.connect_active_notify(clone!(
+        #[strong]
+        refresh_recent,
+        move |b| {
+            if b.is_active() {
+                refresh_recent();
+            }
         }
-    }));
+    ));
 
     let open_recent = gio::SimpleAction::new("open-recent", Some(glib::VariantTy::STRING));
     {
@@ -262,12 +282,20 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     window.add_action(&open_recent);
 
     let clear_recent = gio::SimpleAction::new("clear-recent", None);
-    clear_recent.connect_activate(clone!(@strong refresh_recent => move |_, _| {
-        recent::clear();
-        refresh_recent();
-    }));
+    clear_recent.connect_activate(clone!(
+        #[strong]
+        refresh_recent,
+        move |_, _| {
+            recent::clear();
+            refresh_recent();
+        }
+    ));
     window.add_action(&clear_recent);
-    open_center.connect_clicked(clone!(@strong open_action => move |_| open_action()));
+    open_center.connect_clicked(clone!(
+        #[strong]
+        open_action,
+        move |_| open_action()
+    ));
 
     // novo arquivo em branco
     {
@@ -289,7 +317,10 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
     // confirmação ao fechar com edições não salvas
     let confirmed_close = Rc::new(std::cell::Cell::new(false));
     window.connect_close_request(clone!(
-        @strong current, @strong confirmed_close => @default-return glib::Propagation::Proceed,
+        #[strong]
+        current,
+        #[strong]
+        confirmed_close,
         move |win| {
             if confirmed_close.get() {
                 if let Some(d) = current.borrow().as_ref() {
@@ -297,17 +328,23 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
                 }
                 return glib::Propagation::Proceed;
             }
-            let dirty = current.borrow().as_ref().map_or(false, |d| d.is_dirty());
+            let dirty = current.borrow().as_ref().is_some_and(|d| d.is_dirty());
             if !dirty {
                 if let Some(d) = current.borrow().as_ref() {
                     d.discard_backup();
                 }
                 return glib::Propagation::Proceed;
             }
-            let proceed: Rc<dyn Fn()> = Rc::new(clone!(@strong confirmed_close, @weak win => move || {
-                confirmed_close.set(true);
-                win.close();
-            }));
+            let proceed: Rc<dyn Fn()> = Rc::new(clone!(
+                #[strong]
+                confirmed_close,
+                #[weak]
+                win,
+                move || {
+                    confirmed_close.set(true);
+                    win.close();
+                }
+            ));
             confirm_unsaved(win, &current, proceed);
             glib::Propagation::Stop
         }
@@ -323,9 +360,21 @@ pub fn build_window(app: &gtk::Application, initial: Initial) -> gtk::Applicatio
         );
         let refresh_recent = refresh_recent.clone();
         home_btn.connect_clicked(move |_| {
-            let Some(window) = window_w.upgrade() else { return };
+            let Some(window) = window_w.upgrade() else {
+                return;
+            };
             let go_home: Rc<dyn Fn()> = Rc::new(clone!(
-                @weak window, @weak stack, @strong current, @strong title, @strong refresh_recent => move || {
+                #[weak]
+                window,
+                #[weak]
+                stack,
+                #[strong]
+                current,
+                #[strong]
+                title,
+                #[strong]
+                refresh_recent,
+                move || {
                     if let Some(doc) = current.borrow_mut().take() {
                         doc.discard_backup();
                         doc.teardown();
@@ -370,7 +419,7 @@ fn confirm_unsaved(
     current: &Rc<RefCell<Option<OpenDoc>>>,
     proceed: Rc<dyn Fn()>,
 ) {
-    let dirty = current.borrow().as_ref().map_or(false, |d| d.is_dirty());
+    let dirty = current.borrow().as_ref().is_some_and(|d| d.is_dirty());
     if !dirty {
         proceed();
         return;
@@ -749,6 +798,7 @@ fn reveal_doc(
 /// `XmlDoc` e `QueryResult` são `Send`, então tanto o parse (XML → SQLite)
 /// quanto a consulta inicial completa rodam no pool de threads da GIO; só o
 /// resultado pronto volta para a main thread para montar os widgets em blocos.
+#[allow(clippy::large_enum_variant)] // passa uma vez só, da thread para a UI
 enum Loaded {
     Table(XmlDoc, QueryResult),
     Text(TextLoad),

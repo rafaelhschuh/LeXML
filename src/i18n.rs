@@ -25,13 +25,6 @@ pub fn from_code(s: &str) -> Lang {
     }
 }
 
-pub fn code(l: Lang) -> &'static str {
-    match l {
-        Lang::Pt => "pt",
-        Lang::En => "en",
-    }
-}
-
 /// Tradução de uma chave para o idioma atual.
 pub fn tr(key: &str) -> &'static str {
     match lang() {

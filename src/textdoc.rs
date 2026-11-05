@@ -88,7 +88,11 @@ impl TextDocView {
             *me2.dirty.borrow_mut() = true;
         });
 
-        save_btn.connect_clicked(clone!(@strong me => move |_| me.do_save()));
+        save_btn.connect_clicked(clone!(
+            #[strong]
+            me,
+            move |_| me.do_save()
+        ));
 
         // Ctrl+S salva no arquivo atual; Ctrl+Shift+S abre "Salvar como".
         let save_keys = gtk::EventControllerKey::new();
